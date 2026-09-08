@@ -2,6 +2,8 @@
 
 import logging
 import json
+import re
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import elasticsearch
@@ -22,6 +24,25 @@ from ..tabular import flatten_docs
 from .base import BaseDriver, ConnectionLostError, DriverError, DriverSettings
 
 _DEFAULT_SEARCH_SIZE = 1000
+_DEFAULT_TIME_FIELD = "@timestamp"
+
+_DURATION_UNITS = {
+    "ms": 0.001,
+    "s": 1,
+    "m": 60,
+    "h": 3600,
+    "d": 86400,
+    "w": 604800,
+    "y": 365 * 86400,
+}
+_DURATION_RE = re.compile(r"^([+-]?\d+(?:\.\d+)?)(ms|s|m|h|d|w|y)$")
+_EPOCH_RE = re.compile(r"^-?\d+(?:\.\d+)?$")
+# An ES|QL identifier that needs no backquoting.
+_PLAIN_IDENTIFIER_RE = re.compile(r"^[A-Za-z_@][A-Za-z0-9_@.]*$")
+# ES|QL source commands a time filter may be appended to.
+_ESQL_SOURCE_RE = re.compile(r"^(from|ts|metrics)\b", re.IGNORECASE)
+_ESQL_SORT_RE = re.compile(r"^sort\b", re.IGNORECASE)
+_ESQL_LIMIT_RE = re.compile(r"^limit\b", re.IGNORECASE)
 
 
 logger = logging.getLogger(__name__)
@@ -80,6 +101,34 @@ class ElasticsearchDriver(BaseDriver):
         ),
     ]
 
+    SESSION_PARAMS: list[DriverParam] = [
+        DriverParam(
+            key="time_field",
+            type=ParamType.STRING,
+            label="Time Field",
+            required=False,
+            default=_DEFAULT_TIME_FIELD,
+        ),
+        DriverParam(
+            key="time_from", type=ParamType.STRING, label="From", required=False
+        ),
+        DriverParam(key="time_to", type=ParamType.STRING, label="To", required=False),
+        DriverParam(
+            key="sort_field", type=ParamType.STRING, label="Sort Field", required=False
+        ),
+        DriverParam(
+            key="sort_order",
+            type=ParamType.ENUM,
+            label="Sort Order",
+            required=False,
+            choices=[
+                DriverParamChoice(value="desc", label="Descending"),
+                DriverParamChoice(value="asc", label="Ascending"),
+            ],
+            default="desc",
+        ),
+    ]
+
     HELP: str = """\
 ## Elasticsearch
 
@@ -116,15 +165,97 @@ GET /orders,products/_search
 FROM orders | WHERE status == "open" AND total > 50 | LIMIT 100
 ```
 
+Pick, rename and derive columns with `KEEP` / `DROP` / `RENAME` / `EVAL`:
+
 ```
-FROM orders, products | STATS count = COUNT(*) BY status
+FROM orders
+| EVAL net = total - tax, day = DATE_TRUNC(1 day, @timestamp)
+| KEEP day, customer, net
+| SORT net DESC
+| LIMIT 20
 ```
+
+Aggregate with `STATS ... BY`, bucketing time with `BUCKET`:
+
+```
+FROM logs-*
+| WHERE status >= 500
+| STATS errors = COUNT(*) BY service, span = BUCKET(@timestamp, 1 hour)
+| SORT span DESC, errors DESC
+```
+
+`STATS` output can be filtered again further down the pipe:
+
+```
+FROM traces
+| STATS p95 = PERCENTILE(took_ms, 95), avg = AVG(took_ms), n = COUNT(*) BY service
+| WHERE n > 100
+| SORT p95 DESC
+```
+
+Branch with `CASE`, and fan a multi-valued field out one row per value:
+
+```
+FROM orders
+| EVAL tier = CASE(total > 1000, "large", total > 100, "medium", "small")
+| STATS n = COUNT(*) BY tier
+```
+
+```
+FROM articles | MV_EXPAND tags | STATS n = COUNT(*) BY tags | SORT n DESC | LIMIT 10
+```
+
+Pull structure out of a text field with `GROK` (or `DISSECT`):
+
+```
+FROM logs
+| GROK message "%{IP:client} %{WORD:method} %{URIPATHPARAM:path}"
+| STATS hits = COUNT(*) BY path
+| SORT hits DESC
+| LIMIT 10
+```
+
+Match loosely, and ask for document metadata:
+
+```
+FROM logs-* METADATA _index, _id
+| WHERE message LIKE "*timeout*" AND service IN ("api", "web")
+| KEEP _index, @timestamp, service, message
+| LIMIT 50
+```
+
+ES|QL requires Elasticsearch 8.11 or later.
 
 Any Elasticsearch REST endpoint is accepted — the response is returned as a
 flat table. Search responses unpack `hits.hits`; all other responses are
 flattened as a single row.
 
 System indices (names starting with `.`) are hidden in the resource tree.
+
+**Time range and sorting:** five session settings — changeable any time via
+`session.set`, no reconnect needed — apply to every Lucene and ES|QL query.
+Dev Tools queries are sent exactly as written.
+
+| Setting | Default | Meaning |
+|---------|---------|---------|
+| `time_field` | `@timestamp` | Date field the range filters on |
+| `time_from` | — | Lower bound, inclusive |
+| `time_to` | — | Upper bound, inclusive |
+| `sort_field` | — | Field to order results by |
+| `sort_order` | `desc` | `asc` or `desc` |
+
+`time_from` / `time_to` accept `now`, an offset from now (`-1h`, `now-30m`,
+`+15s`), an ISO-8601 timestamp (`2024-01-01T00:00:00Z`), or a Unix timestamp in
+seconds. Either bound may stand alone; leave both empty for no time filter.
+Setting any of the five to an empty string restores its default.
+
+In Lucene mode the range becomes a `range` filter beside the query and the sort
+a `sort` clause. In ES|QL mode the range is spliced in as a `WHERE` directly
+after the source command — where the time field is still in scope, a `STATS`
+further down the pipe having dropped it — and the sort appended as a `SORT`,
+ahead of a trailing `LIMIT` so the limit takes the head of the sorted result. A
+query carrying its own `SORT` keeps it, and one that reads no index (`ROW`,
+`SHOW`) is left untouched.
 
 **Resources:**
 
@@ -147,6 +278,10 @@ Describing an index returns field metadata from its mapping (name, type).
         super().__init__(params, settings)
         self._client = client
         self._ever_connected = False
+        self._session_values: dict[str, Any] = {
+            p.key: p.default for p in self.SESSION_PARAMS
+        }
+        """Runtime SESSION_PARAMS values, seeded from their declared defaults."""
 
     @classmethod
     async def create(
@@ -204,10 +339,30 @@ Describing an index returns field metadata from its mapping (name, type).
                 "Example: orders | status:open AND total:>50"
             )
         index, _, lucene = query.partition(" | ")
-        log_query(logger, query)
-        resp = await self._client.search(
-            index=index.strip(), q=lucene.strip(), size=_DEFAULT_SEARCH_SIZE
-        )
+        kwargs: dict[str, Any] = {
+            "index": index.strip(),
+            "size": _DEFAULT_SEARCH_SIZE,
+        }
+        applied = []
+        # The session time range cannot ride along with `q` (a URI parameter),
+        # so a bounded search restates the Lucene string as a `query_string`
+        # inside a bool whose filter carries the range.
+        time_filter = self._time_filter()
+        if time_filter is None:
+            kwargs["q"] = lucene.strip()
+        else:
+            kwargs["query"] = {
+                "bool": {
+                    "must": [{"query_string": {"query": lucene.strip()}}],
+                    "filter": [time_filter],
+                }
+            }
+            applied.append(f"range={json.dumps(time_filter['range'])}")
+        if sort := self._sort_clause():
+            kwargs["sort"] = sort
+            applied.append(f"sort={json.dumps(sort)}")
+        log_query(logger, f"{query} [{' '.join(applied)}]" if applied else query)
+        resp = await self._client.search(**kwargs)
         return self._hits_to_result(resp)
 
     async def _execute_dev_tools(self, query: str) -> ReadResult:
@@ -248,11 +403,110 @@ Describing an index returns field metadata from its mapping (name, type).
         return ReadResult(columns=["response"], rows=[[str(resp)]], rows_total=1)
 
     async def _execute_esql(self, query: str) -> ReadResult:
-        log_query(logger, query)
-        resp = await self._client.esql.query(query=query, format="json")
+        effective = self._apply_esql_settings(query)
+        log_query(logger, effective)
+        try:
+            resp = await self._client.esql.query(query=effective, format="json")
+        except elasticsearch.ApiError as exc:
+            raise _esql_error(exc) from exc
         columns = [col["name"] for col in resp["columns"]]
         rows = resp["values"]
         return ReadResult(columns=columns, rows=rows, rows_total=len(rows))
+
+    def _apply_esql_settings(self, query: str) -> str:
+        """Fold the session time range and sort field into an ES|QL query.
+
+        The time filter goes straight after the source command, where the
+        timestamp field is still in scope (a `STATS` further down the pipe may
+        drop it); the sort goes at the end, but ahead of a trailing `LIMIT` so
+        the limit takes the first rows of the sorted result rather than sorting
+        an arbitrary slice. Both are skipped when the query already says
+        otherwise: an explicit `SORT` wins over the session setting, and a query
+        drawing on no index at all (`ROW`, `SHOW`) is left alone entirely —
+        neither the time field nor the sort field exists in its output.
+        """
+        esql = query.strip()
+        commands = _split_commands(esql)
+        if not _ESQL_SOURCE_RE.match(esql[slice(*commands[0])]):
+            return esql
+        if clause := self._esql_time_clause():
+            at = commands[0][1]
+            esql = f"{esql[:at]} | WHERE {clause}{esql[at:]}"
+            commands = _split_commands(esql)
+        sort_field = self._session_values.get("sort_field")
+        if sort_field and not any(
+            _ESQL_SORT_RE.match(esql[slice(*span)]) for span in commands
+        ):
+            order = str(self._session_values.get("sort_order") or "desc").upper()
+            at = commands[-1][1]
+            if len(commands) > 1 and _ESQL_LIMIT_RE.match(esql[slice(*commands[-1])]):
+                at = commands[-2][1]
+            sort = f" | SORT {_esql_identifier(str(sort_field))} {order}"
+            esql = f"{esql[:at]}{sort}{esql[at:]}"
+        return esql
+
+    def _time_field(self) -> str:
+        return str(self._session_values.get("time_field") or _DEFAULT_TIME_FIELD)
+
+    def _time_bounds(self) -> dict[str, str]:
+        """Resolved `gte`/`lte` bounds for the session time range, if any."""
+        bounds = {}
+        for key, op in (("time_from", "gte"), ("time_to", "lte")):
+            if value := self._session_values.get(key):
+                bounds[op] = _es_datetime(_resolve_time(str(value)))
+        return bounds
+
+    def _time_filter(self) -> dict[str, Any] | None:
+        """The session time range as a `range` query clause, or None if unset."""
+        bounds = self._time_bounds()
+        return {"range": {self._time_field(): bounds}} if bounds else None
+
+    def _esql_time_clause(self) -> str | None:
+        """The session time range as an ES|QL boolean expression, or None."""
+        field = _esql_identifier(self._time_field())
+        bounds = self._time_bounds()
+        parts = [
+            f'{field} {op} TO_DATETIME("{value}")'
+            for op, value in (
+                (">=", bounds.get("gte")),
+                ("<=", bounds.get("lte")),
+            )
+            if value
+        ]
+        return " AND ".join(parts) or None
+
+    def _sort_clause(self) -> list[dict[str, Any]] | None:
+        """The session sort field as a search `sort` clause, or None if unset."""
+        field = self._session_values.get("sort_field")
+        if not field:
+            return None
+        order = str(self._session_values.get("sort_order") or "desc")
+        return [{str(field): {"order": order}}]
+
+    async def set_session(self, values: dict[str, Any]) -> None:
+        known = {p.key for p in self.SESSION_PARAMS}
+        if unknown := sorted(set(values) - known):
+            raise DriverError(f"Unknown session setting: {', '.join(unknown)}")
+        defaults = {p.key: p.default for p in self.SESSION_PARAMS}
+        updated = dict(self._session_values)
+        for key, value in values.items():
+            text = "" if value is None else str(value).strip()
+            if not text:
+                updated[key] = defaults[key]
+                continue
+            if key in ("time_from", "time_to"):
+                _resolve_time(text)  # reject a bad bound here, not at query time
+            elif key == "sort_order":
+                text = text.lower()
+                if text not in ("asc", "desc"):
+                    raise DriverError(
+                        f"Unknown sort_order: {value!r} (expected 'asc' or 'desc')"
+                    )
+            updated[key] = text
+        self._session_values = updated
+
+    def get_session(self) -> dict[str, Any]:
+        return dict(self._session_values)
 
     @staticmethod
     def _parse_body(
@@ -352,3 +606,111 @@ Describing an index returns field metadata from its mapping (name, type).
                 )
             case _:
                 return None
+
+
+def _resolve_time(value: str) -> datetime:
+    """Resolve a session time bound to an absolute UTC datetime.
+
+    Accepts `now`, an offset from now (`-1h`, `now-30m`, `+15s`), an ISO-8601
+    timestamp, or a Unix timestamp in seconds. Resolving here rather than
+    handing Elasticsearch its own date math keeps one syntax across the Lucene
+    and ES|QL modes — ES|QL has no `now-1h` literal.
+
+    Raises:
+        DriverError: If the value is in none of those forms.
+    """
+    text = value.strip()
+    now = datetime.now(UTC)
+    if text.lower().startswith("now"):
+        text = text[3:].strip()
+        if not text:
+            return now
+    if match := _DURATION_RE.match(text):
+        amount, unit = match.groups()
+        return now + timedelta(seconds=float(amount) * _DURATION_UNITS[unit])
+    if _EPOCH_RE.match(text):
+        return datetime.fromtimestamp(float(text), tz=UTC)
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError as exc:
+        raise DriverError(
+            f"Invalid time value {value!r} — expected 'now', an offset such as "
+            "'-1h', an ISO-8601 timestamp, or a Unix timestamp"
+        ) from exc
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def _es_datetime(when: datetime) -> str:
+    """Format a datetime as the UTC millisecond form both ES and ES|QL read."""
+    utc = when.astimezone(UTC)
+    return f"{utc.strftime('%Y-%m-%dT%H:%M:%S')}.{utc.microsecond // 1000:03d}Z"
+
+
+def _esql_identifier(name: str) -> str:
+    """Quote a field name for ES|QL, leaving plain identifiers untouched."""
+    if _PLAIN_IDENTIFIER_RE.match(name):
+        return name
+    return "`" + name.replace("`", "``") + "`"
+
+
+def _split_commands(query: str) -> list[tuple[int, int]]:
+    """Spans of the top-level `|`-separated commands of an ES|QL query.
+
+    Each span excludes surrounding whitespace, so a command's end offset is
+    exactly where a ` | NEW COMMAND` can be spliced in. Pipes inside string
+    literals (including triple-quoted blocks) and backquoted identifiers do
+    not split.
+    """
+    spans: list[tuple[int, int]] = []
+    start = 0
+    i = 0
+    while i < len(query):
+        char = query[i]
+        if char == '"':
+            if query.startswith('"""', i):
+                end = query.find('"""', i + 3)
+                i = len(query) if end == -1 else end + 3
+                continue
+            i += 1
+            while i < len(query):
+                if query[i] == "\\":
+                    i += 2
+                    continue
+                if query[i] == '"':
+                    i += 1
+                    break
+                i += 1
+            continue
+        if char == "`":
+            i += 1
+            while i < len(query) and query[i] != "`":
+                i += 1
+            i += 1
+            continue
+        if char == "|":
+            spans.append((start, i))
+            start = i + 1
+        i += 1
+    spans.append((start, len(query)))
+    return [
+        (s + len(text) - len(text.lstrip()), e - (len(text) - len(text.rstrip())))
+        for s, e in spans
+        for text in [query[s:e]]
+    ]
+
+
+def _esql_error(exc: elasticsearch.ApiError) -> DriverError:
+    """Turn an ES|QL API error into a DriverError, naming the likely cause.
+
+    A server without the ES|QL endpoint matches `POST /_query` against its
+    `/{index}` handlers instead, so the rejection is about the HTTP method
+    rather than the query — unreadable unless it is spelled out.
+    """
+    message = str(exc)
+    if "Incorrect HTTP method for uri" in message and "/_query" in message:
+        return DriverError(
+            "This server does not support ES|QL — it has no /_query endpoint. "
+            "ES|QL requires Elasticsearch 8.11 or later; use the Lucene or Dev "
+            "Tools query mode instead."
+        )
+    return DriverError(message)

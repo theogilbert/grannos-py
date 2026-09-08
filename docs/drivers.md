@@ -185,6 +185,16 @@ holds the Neo4j index type (`RANGE`, `TEXT`, `POINT`, …).
 | `password` | no | — | Password (masked) |
 | `query_mode` | yes | `lucene` | Query language: `lucene`, `dev_tools`, or `esql` |
 
+**Session settings** (`session.set` / `session.get`, no reconnect needed):
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `time_field` | `@timestamp` | Date field the time range filters on |
+| `time_from` | — | Lower bound of the time range, inclusive |
+| `time_to` | — | Upper bound of the time range, inclusive |
+| `sort_field` | — | Field to order results by |
+| `sort_order` | `desc` | `asc` or `desc` |
+
 **Queries:** Prefix with the target index name (pattern or alias) and ` | `.
 This prefix is not needed in `esql` mode, where the target index is named
 in the query itself (`FROM <index>`).
@@ -217,13 +227,95 @@ GET /orders,products/_search
 FROM orders | WHERE status == "open" AND total > 50 | LIMIT 100
 ```
 
+Pick, rename and derive columns with `KEEP` / `DROP` / `RENAME` / `EVAL`:
+
 ```
-FROM orders, products | STATS count = COUNT(*) BY status
+FROM orders
+| EVAL net = total - tax, day = DATE_TRUNC(1 day, @timestamp)
+| KEEP day, customer, net
+| SORT net DESC
+| LIMIT 20
 ```
+
+Aggregate with `STATS ... BY`, bucketing time with `BUCKET`:
+
+```
+FROM logs-*
+| WHERE status >= 500
+| STATS errors = COUNT(*) BY service, span = BUCKET(@timestamp, 1 hour)
+| SORT span DESC, errors DESC
+```
+
+`STATS` output can be filtered again further down the pipe:
+
+```
+FROM traces
+| STATS p95 = PERCENTILE(took_ms, 95), avg = AVG(took_ms), n = COUNT(*) BY service
+| WHERE n > 100
+| SORT p95 DESC
+```
+
+Branch with `CASE`, and fan a multi-valued field out one row per value:
+
+```
+FROM orders
+| EVAL tier = CASE(total > 1000, "large", total > 100, "medium", "small")
+| STATS n = COUNT(*) BY tier
+```
+
+```
+FROM articles | MV_EXPAND tags | STATS n = COUNT(*) BY tags | SORT n DESC | LIMIT 10
+```
+
+Pull structure out of a text field with `GROK` (or `DISSECT`):
+
+```
+FROM logs
+| GROK message "%{IP:client} %{WORD:method} %{URIPATHPARAM:path}"
+| STATS hits = COUNT(*) BY path
+| SORT hits DESC
+| LIMIT 10
+```
+
+Match loosely, and ask for document metadata:
+
+```
+FROM logs-* METADATA _index, _id
+| WHERE message LIKE "*timeout*" AND service IN ("api", "web")
+| KEEP _index, @timestamp, service, message
+| LIMIT 50
+```
+
+ES|QL requires Elasticsearch 8.11 or later.
 
 Any Elasticsearch REST endpoint is accepted — the response is returned as a
 flat table. Search responses unpack `hits.hits`; all other responses are
 flattened as a single row.
+
+**Time range and sorting:** five session settings — changeable any time via
+`session.set`, no reconnect needed — apply to every Lucene and ES|QL query.
+Dev Tools queries are sent exactly as written.
+
+| Setting | Default | Meaning |
+|---------|---------|---------|
+| `time_field` | `@timestamp` | Date field the range filters on |
+| `time_from` | — | Lower bound, inclusive |
+| `time_to` | — | Upper bound, inclusive |
+| `sort_field` | — | Field to order results by |
+| `sort_order` | `desc` | `asc` or `desc` |
+
+`time_from` / `time_to` accept `now`, an offset from now (`-1h`, `now-30m`,
+`+15s`), an ISO-8601 timestamp (`2024-01-01T00:00:00Z`), or a Unix timestamp in
+seconds. Either bound may stand alone; leave both empty for no time filter.
+Setting any of the five to an empty string restores its default.
+
+In Lucene mode the range becomes a `range` filter beside the query and the sort
+a `sort` clause. In ES|QL mode the range is spliced in as a `WHERE` directly
+after the source command — where the time field is still in scope, a `STATS`
+further down the pipe having dropped it — and the sort appended as a `SORT`,
+ahead of a trailing `LIMIT` so the limit takes the head of the sorted result. A
+query carrying its own `SORT` keeps it, and one that reads no index (`ROW`,
+`SHOW`) is left untouched.
 
 **Explore tree:**
 

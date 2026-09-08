@@ -1,12 +1,19 @@
 """Unit tests for ElasticsearchDriver — no live server required."""
 
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import elasticsearch
 import pytest
 
 from grannos.drivers.base import DriverError, DriverSettings
-from grannos.drivers.elasticsearch import ElasticsearchDriver
+from grannos.drivers.elasticsearch import (
+    ElasticsearchDriver,
+    _es_datetime,
+    _resolve_time,
+    _split_commands,
+)
 from grannos.protocol import ReadResult
 
 
@@ -131,3 +138,267 @@ class TestExecuteDevToolsErrors:
         driver = _driver_with_response({"error": "index_not_found", "status": 404})
         with pytest.raises(DriverError, match="index_not_found"):
             await driver.execute("GET /missing/_search", [])
+
+
+def _lucene_driver() -> tuple[ElasticsearchDriver, MagicMock]:
+    client = MagicMock()
+    client.search = AsyncMock(
+        return_value={"hits": {"total": {"value": 0}, "hits": []}}
+    )
+    return ElasticsearchDriver({}, client, DriverSettings()), client
+
+
+def _esql_driver() -> ElasticsearchDriver:
+    return ElasticsearchDriver({"query_mode": "esql"}, MagicMock(), DriverSettings())
+
+
+class TestResolveTime:
+    def test_now(self) -> None:
+        before = datetime.now(UTC)
+        assert before <= _resolve_time("now") <= datetime.now(UTC)
+
+    def test_negative_offset(self) -> None:
+        delta = datetime.now(UTC) - _resolve_time("-1h")
+        assert timedelta(minutes=59) < delta < timedelta(minutes=61)
+
+    def test_now_prefixed_offset(self) -> None:
+        delta = datetime.now(UTC) - _resolve_time("now-30m")
+        assert timedelta(minutes=29) < delta < timedelta(minutes=31)
+
+    def test_positive_offset(self) -> None:
+        assert _resolve_time("+15s") > datetime.now(UTC)
+
+    def test_iso_timestamp(self) -> None:
+        assert _resolve_time("2024-01-01T00:00:00Z") == datetime(2024, 1, 1, tzinfo=UTC)
+
+    def test_naive_iso_timestamp_is_utc(self) -> None:
+        assert _resolve_time("2024-01-01T00:00:00") == datetime(2024, 1, 1, tzinfo=UTC)
+
+    def test_unix_timestamp(self) -> None:
+        assert _resolve_time("1704067200") == datetime(2024, 1, 1, tzinfo=UTC)
+
+    def test_invalid_raises(self) -> None:
+        with pytest.raises(DriverError, match="Invalid time value"):
+            _resolve_time("last tuesday")
+
+    def test_formats_as_utc_milliseconds(self) -> None:
+        when = datetime(2024, 1, 2, 3, 4, 5, 678999, tzinfo=UTC)
+        assert _es_datetime(when) == "2024-01-02T03:04:05.678Z"
+
+
+class TestSessionSettings:
+    def test_defaults(self) -> None:
+        driver, _ = _lucene_driver()
+        assert driver.get_session() == {
+            "time_field": "@timestamp",
+            "time_from": None,
+            "time_to": None,
+            "sort_field": None,
+            "sort_order": "desc",
+        }
+
+    async def test_set_updates_only_given_keys(self) -> None:
+        driver, _ = _lucene_driver()
+        await driver.set_session({"sort_field": "total"})
+        assert driver.get_session()["sort_field"] == "total"
+        assert driver.get_session()["sort_order"] == "desc"
+
+    async def test_sort_order_is_normalised(self) -> None:
+        driver, _ = _lucene_driver()
+        await driver.set_session({"sort_order": "ASC"})
+        assert driver.get_session()["sort_order"] == "asc"
+
+    async def test_empty_value_restores_default(self) -> None:
+        driver, _ = _lucene_driver()
+        await driver.set_session({"time_from": "-1h", "time_field": "created_at"})
+        await driver.set_session({"time_from": "", "time_field": ""})
+        assert driver.get_session()["time_from"] is None
+        assert driver.get_session()["time_field"] == "@timestamp"
+
+    async def test_invalid_time_bound_raises(self) -> None:
+        driver, _ = _lucene_driver()
+        with pytest.raises(DriverError, match="Invalid time value"):
+            await driver.set_session({"time_from": "yesterday"})
+
+    async def test_invalid_sort_order_raises(self) -> None:
+        driver, _ = _lucene_driver()
+        with pytest.raises(DriverError, match="Unknown sort_order"):
+            await driver.set_session({"sort_order": "sideways"})
+
+    async def test_unknown_setting_raises(self) -> None:
+        driver, _ = _lucene_driver()
+        with pytest.raises(DriverError, match="Unknown session setting: nope"):
+            await driver.set_session({"nope": "1"})
+
+
+class TestLuceneSessionSettings:
+    async def test_unset_settings_leave_query_untouched(self) -> None:
+        driver, client = _lucene_driver()
+        await driver.execute("orders | status:open", [])
+        assert client.search.call_args.kwargs == {
+            "index": "orders",
+            "size": 1000,
+            "q": "status:open",
+        }
+
+    async def test_time_range_becomes_filtered_bool_query(self) -> None:
+        driver, client = _lucene_driver()
+        await driver.set_session(
+            {"time_from": "2024-01-01T00:00:00Z", "time_to": "2024-01-02T00:00:00Z"}
+        )
+        await driver.execute("orders | status:open", [])
+        kwargs = client.search.call_args.kwargs
+        assert "q" not in kwargs
+        assert kwargs["query"] == {
+            "bool": {
+                "must": [{"query_string": {"query": "status:open"}}],
+                "filter": [
+                    {
+                        "range": {
+                            "@timestamp": {
+                                "gte": "2024-01-01T00:00:00.000Z",
+                                "lte": "2024-01-02T00:00:00.000Z",
+                            }
+                        }
+                    }
+                ],
+            }
+        }
+
+    async def test_open_ended_range_and_custom_field(self) -> None:
+        driver, client = _lucene_driver()
+        await driver.set_session(
+            {"time_field": "created_at", "time_to": "2024-01-02T00:00:00Z"}
+        )
+        await driver.execute("orders | *", [])
+        assert client.search.call_args.kwargs["query"]["bool"]["filter"] == [
+            {"range": {"created_at": {"lte": "2024-01-02T00:00:00.000Z"}}}
+        ]
+
+    async def test_sort_field_becomes_sort_clause(self) -> None:
+        driver, client = _lucene_driver()
+        await driver.set_session({"sort_field": "total", "sort_order": "asc"})
+        await driver.execute("orders | *", [])
+        kwargs = client.search.call_args.kwargs
+        assert kwargs["sort"] == [{"total": {"order": "asc"}}]
+        assert kwargs["q"] == "*"
+
+
+class TestEsqlSessionSettings:
+    async def test_time_range_follows_source_command(self) -> None:
+        driver = _esql_driver()
+        await driver.set_session({"time_from": "2024-01-01T00:00:00Z"})
+        assert driver._apply_esql_settings('FROM orders | WHERE status == "open"') == (
+            'FROM orders | WHERE @timestamp >= TO_DATETIME("2024-01-01T00:00:00.000Z")'
+            ' | WHERE status == "open"'
+        )
+
+    async def test_both_bounds(self) -> None:
+        driver = _esql_driver()
+        await driver.set_session(
+            {"time_from": "2024-01-01T00:00:00Z", "time_to": "2024-01-02T00:00:00Z"}
+        )
+        assert driver._apply_esql_settings("FROM orders") == (
+            'FROM orders | WHERE @timestamp >= TO_DATETIME("2024-01-01T00:00:00.000Z")'
+            ' AND @timestamp <= TO_DATETIME("2024-01-02T00:00:00.000Z")'
+        )
+
+    async def test_sort_is_appended(self) -> None:
+        driver = _esql_driver()
+        await driver.set_session({"sort_field": "total", "sort_order": "asc"})
+        assert (
+            driver._apply_esql_settings("FROM orders | KEEP total")
+            == "FROM orders | KEEP total | SORT total ASC"
+        )
+
+    async def test_sort_goes_before_a_trailing_limit(self) -> None:
+        driver = _esql_driver()
+        await driver.set_session({"sort_field": "@timestamp"})
+        assert (
+            driver._apply_esql_settings("FROM orders | LIMIT 10")
+            == "FROM orders | SORT @timestamp DESC | LIMIT 10"
+        )
+
+    async def test_explicit_sort_wins(self) -> None:
+        driver = _esql_driver()
+        await driver.set_session({"sort_field": "total"})
+        query = "FROM orders | SORT name ASC | LIMIT 10"
+        assert driver._apply_esql_settings(query) == query
+
+    async def test_field_needing_quotes_is_backquoted(self) -> None:
+        driver = _esql_driver()
+        await driver.set_session({"time_field": "event time", "time_from": "0"})
+        assert driver._apply_esql_settings("FROM orders") == (
+            'FROM orders | WHERE `event time` >= TO_DATETIME("1970-01-01T00:00:00.000Z")'
+        )
+
+    async def test_sourceless_query_is_untouched(self) -> None:
+        driver = _esql_driver()
+        await driver.set_session({"time_from": "-1h", "sort_field": "total"})
+        assert driver._apply_esql_settings("ROW a = 1") == "ROW a = 1"
+
+    async def test_pipe_inside_string_literal_does_not_split(self) -> None:
+        driver = _esql_driver()
+        await driver.set_session({"sort_field": "total"})
+        assert (
+            driver._apply_esql_settings('FROM logs | WHERE msg == "a | b"')
+            == 'FROM logs | WHERE msg == "a | b" | SORT total DESC'
+        )
+
+    async def test_settings_reach_the_client(self) -> None:
+        client = MagicMock()
+        client.esql.query = AsyncMock(return_value={"columns": [], "values": []})
+        driver = ElasticsearchDriver({"query_mode": "esql"}, client, DriverSettings())
+        await driver.set_session({"sort_field": "total"})
+        await driver.execute("FROM orders", [])
+        client.esql.query.assert_awaited_once_with(
+            query="FROM orders | SORT total DESC", format="json"
+        )
+
+
+class TestSplitCommands:
+    def test_single_command(self) -> None:
+        assert _split_commands("FROM orders") == [(0, 11)]
+
+    def test_spans_exclude_surrounding_whitespace(self) -> None:
+        query = "FROM orders\n| LIMIT 5"
+        spans = _split_commands(query)
+        assert [query[slice(*span)] for span in spans] == ["FROM orders", "LIMIT 5"]
+
+    def test_pipe_in_backquoted_identifier(self) -> None:
+        query = "FROM orders | KEEP `a|b`"
+        assert [query[slice(*s)] for s in _split_commands(query)] == [
+            "FROM orders",
+            "KEEP `a|b`",
+        ]
+
+    def test_pipe_in_triple_quoted_string(self) -> None:
+        query = 'FROM logs | WHERE m == """a | b"""'
+        assert [query[slice(*s)] for s in _split_commands(query)] == [
+            "FROM logs",
+            'WHERE m == """a | b"""',
+        ]
+
+    def test_escaped_quote_inside_string(self) -> None:
+        query = 'FROM logs | WHERE m == "a \\" | b" | LIMIT 1'
+        assert [query[slice(*s)] for s in _split_commands(query)] == [
+            "FROM logs",
+            'WHERE m == "a \\" | b"',
+            "LIMIT 1",
+        ]
+
+
+class TestEsqlErrors:
+    async def test_missing_query_endpoint_is_explained(self) -> None:
+        client = MagicMock()
+        client.esql.query = AsyncMock(
+            side_effect=elasticsearch.BadRequestError(
+                "Incorrect HTTP method for uri (/_query?format=json) and method "
+                "[POST]. allowed: [HEAD, DELETE, GET, PUT]",
+                SimpleNamespace(status=400),  # ty: ignore[invalid-argument-type]
+                None,
+            )
+        )
+        driver = ElasticsearchDriver({"query_mode": "esql"}, client, DriverSettings())
+        with pytest.raises(DriverError, match="does not support ES|QL"):
+            await driver.execute("FROM orders", [])

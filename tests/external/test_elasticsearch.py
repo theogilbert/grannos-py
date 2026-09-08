@@ -79,6 +79,7 @@ async def clean_index(driver: ElasticsearchDriver) -> AsyncGenerator[None, None]
                     "name": {"type": "keyword"},
                     "status": {"type": "keyword"},
                     "total": {"type": "float"},
+                    "created_at": {"type": "date"},
                 }
             }
         },
@@ -253,3 +254,48 @@ class TestExploreDescribe:
     ) -> None:
         result = await driver.explore_describe([_INDEX, "mappings"])
         assert result is None
+
+
+_DATED_DOCS = [
+    {"name": "Old", "status": "active", "created_at": "2024-01-01T00:00:00Z"},
+    {"name": "New", "status": "active", "created_at": "2024-06-01T00:00:00Z"},
+]
+
+
+def _names(result: ReadResult) -> list:
+    return [row[result.columns.index("name")] for row in result.rows]
+
+
+class TestSessionTimeRange:
+    async def test_lucene_filters_by_time_range(
+        self, driver: ElasticsearchDriver
+    ) -> None:
+        await _index_docs(driver, _DATED_DOCS)
+        await driver.set_session(
+            {"time_field": "created_at", "time_from": "2024-03-01T00:00:00Z"}
+        )
+        result = await driver.execute(f"{_INDEX} | status:active", [])
+        assert isinstance(result, ReadResult)
+        assert _names(result) == ["New"]
+
+    async def test_lucene_sorts_by_field(self, driver: ElasticsearchDriver) -> None:
+        await _index_docs(driver, _DATED_DOCS)
+        await driver.set_session({"sort_field": "created_at", "sort_order": "desc"})
+        result = await driver.execute(f"{_INDEX} | *", [])
+        assert isinstance(result, ReadResult)
+        assert _names(result) == ["New", "Old"]
+
+    async def test_esql_filters_and_sorts(
+        self, driver: ElasticsearchDriver, esql_driver: ElasticsearchDriver
+    ) -> None:
+        await _index_docs(driver, _DATED_DOCS)
+        await esql_driver.set_session(
+            {
+                "time_field": "created_at",
+                "time_to": "2024-03-01T00:00:00Z",
+                "sort_field": "created_at",
+            }
+        )
+        result = await esql_driver.execute(f"FROM {_INDEX} | LIMIT 10", [])
+        assert isinstance(result, ReadResult)
+        assert _names(result) == ["Old"]
