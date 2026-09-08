@@ -131,16 +131,56 @@ class TestFormatDbError:
         exc = _make_db_error("ORA-00936: missing expression", offset=0)
         assert _format_db_error(exc, "SELECT FROM t") == "ORA-00936: missing expression"
 
-    def test_with_offset_appends_line_col(self) -> None:
+    def test_with_offset_appends_line_col_and_excerpt(self) -> None:
         exc = _make_db_error("ORA-00936: missing expression", offset=7)
         result = _format_db_error(exc, "SELECT FROM t")
-        assert result == "ORA-00936: missing expression (line 1, col 8)"
+        assert result == (
+            "ORA-00936: missing expression (line 1, col 8)\n"
+            "1 | SELECT FROM t\n"
+            "           ^"
+        )
 
     def test_multiline_query_offset_shows_correct_line(self) -> None:
         query = "SELECT\nFROM t"
         exc = _make_db_error("ORA-00936: missing expression", offset=7)
         result = _format_db_error(exc, query)
-        assert result == "ORA-00936: missing expression (line 2, col 1)"
+        assert result == (
+            "ORA-00936: missing expression (line 2, col 1)\n2 | FROM t\n    ^"
+        )
+
+    def test_position_in_message_quotes_the_line(self) -> None:
+        query = "BEGIN\n  bogus\nEND;"
+        exc = _make_db_error(
+            "ORA-06550: line 2, column 3:\nPLS-00103: Encountered the symbol", offset=0
+        )
+        result = _format_db_error(exc, query)
+        assert result.endswith("\n2 |   bogus\n      ^")
+
+    def test_position_in_message_skips_leading_comments(self) -> None:
+        query = "-- a note\n\nBEGIN\n  bogus\nEND;"
+        exc = _make_db_error("ORA-06550: line 2, column 3:", offset=0)
+        result = _format_db_error(exc, query)
+        assert result.endswith("\n4 |   bogus\n      ^")
+
+    def test_offset_wins_over_a_position_in_the_message(self) -> None:
+        exc = _make_db_error("ORA-06550: line 9, column 9:", offset=7)
+        result = _format_db_error(exc, "SELECT FROM t")
+        assert result.startswith("ORA-06550: line 9, column 9: (line 1, col 8)\n1 | ")
+
+    def test_position_outside_the_query_is_dropped(self) -> None:
+        exc = _make_db_error("ORA-06550: line 40, column 3:", offset=0)
+        result = _format_db_error(exc, "BEGIN\n  bogus\nEND;")
+        assert result == "ORA-06550: line 40, column 3:"
+
+    def test_column_past_the_end_of_the_line_is_dropped(self) -> None:
+        exc = _make_db_error("ORA-06550: line 1, column 80:", offset=0)
+        result = _format_db_error(exc, "BEGIN\n  bogus\nEND;")
+        assert result == "ORA-06550: line 1, column 80:"
+
+    def test_tabs_are_narrowed_so_the_caret_lines_up(self) -> None:
+        exc = _make_db_error("ORA-00936: missing expression", offset=8)
+        result = _format_db_error(exc, "SELECT\t*\tFROM")
+        assert result.endswith("\n1 | SELECT\t*\tFROM\n            ^".expandtabs(1))
 
 
 def _col(

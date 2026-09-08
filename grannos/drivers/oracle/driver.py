@@ -1124,13 +1124,58 @@ def _maybe_raise_connection_lost(exc: Exception) -> None:
 
 
 def _format_db_error(exc: oracledb.DatabaseError, query: str) -> str:
+    """Format a database error, pointing at the spot in the query it names.
+
+    Oracle locates a syntax error two different ways: a character ``offset``
+    into the statement (SQL), or a ``line``/``column`` written into the message
+    text (PL/SQL, ORA-06550). Either way the client is left counting lines to
+    find the place, so the offending line is quoted back with a caret under it.
+    """
     msg = _exc_message(exc)
     error = exc.args[0] if exc.args else None
     offset = getattr(error, "offset", 0)
     if offset > 0:
         line, col = _offset_to_line_col(query, offset)
         msg = f"{msg} (line {line}, col {col})"
-    return msg
+    elif position := _message_line_col(msg):
+        # PL/SQL numbers from the start of the block, which is where the
+        # submitted query starts once blank and comment lines are accounted for.
+        line, col = position
+        line += _statement_start_line(query) - 1
+    else:
+        return msg
+    excerpt = _error_excerpt(query, line, col)
+    return f"{msg}\n{excerpt}" if excerpt else msg
+
+
+_MESSAGE_POSITION_RE = re.compile(r"line (\d+), column (\d+)", re.IGNORECASE)
+
+
+def _message_line_col(message: str) -> tuple[int, int] | None:
+    """The ``line N, column M`` position Oracle wrote into an error message."""
+    match = _MESSAGE_POSITION_RE.search(message)
+    if match is None:
+        return None
+    return int(match.group(1)), int(match.group(2))
+
+
+def _error_excerpt(query: str, line: int, col: int) -> str | None:
+    """Quote line *line* of *query* with a caret under column *col*.
+
+    Returns None if the position falls outside the query — a line number
+    relative to something other than what was submitted (a stored object's own
+    source, say) would otherwise point at an innocent line.
+    """
+    lines = query.splitlines()
+    if not 1 <= line <= len(lines):
+        return None
+    text = lines[line - 1]
+    if not 1 <= col <= len(text) + 1:
+        return None
+    gutter = f"{line} | "
+    # Tabs are one column to Oracle but many to a terminal: keeping them in the
+    # quoted line while padding the caret with spaces would drift them apart.
+    return f"{gutter}{text.expandtabs(1)}\n{' ' * (len(gutter) + col - 1)}^"
 
 
 def _offset_to_line_col(query: str, offset: int) -> tuple[int, int]:
