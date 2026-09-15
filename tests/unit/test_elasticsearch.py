@@ -10,11 +10,13 @@ import pytest
 from grannos.drivers.base import DriverError, DriverSettings
 from grannos.drivers.elasticsearch import (
     ElasticsearchDriver,
+    _duration,
     _es_datetime,
+    _fill_gaps,
     _resolve_time,
     _split_commands,
 )
-from grannos.protocol import ReadResult
+from grannos.protocol import HistogramBucket, HistogramResult, ReadResult
 
 
 async def _hosts(params: dict) -> list[str]:
@@ -402,3 +404,209 @@ class TestEsqlErrors:
         driver = ElasticsearchDriver({"query_mode": "esql"}, client, DriverSettings())
         with pytest.raises(DriverError, match="does not support ES|QL"):
             await driver.execute("FROM orders", [])
+
+
+def _hist_driver(mode: str) -> tuple[ElasticsearchDriver, MagicMock]:
+    client = MagicMock()
+    client.search = AsyncMock(
+        return_value={
+            "aggregations": {
+                "histogram": {
+                    "interval": "5m",
+                    "buckets": [
+                        {"key": 1704067200000, "doc_count": 4},
+                        {"key": 1704067500000, "doc_count": 0},
+                        {"key": 1704067800000, "doc_count": 7},
+                    ],
+                }
+            }
+        }
+    )
+    client.esql.query = AsyncMock()
+    return ElasticsearchDriver({"query_mode": mode}, client, DriverSettings()), client
+
+
+class TestHistogramLucene:
+    async def test_aggregates_the_query_with_no_hits(self) -> None:
+        driver, client = _hist_driver("lucene")
+        result = await driver.histogram("logs | level:error", 40)
+        assert client.search.call_args.kwargs == {
+            "index": "logs",
+            "q": "level:error",
+            "size": 0,
+            "track_total_hits": False,
+            "aggs": {
+                "histogram": {
+                    "auto_date_histogram": {"field": "@timestamp", "buckets": 40}
+                }
+            },
+        }
+        assert result == HistogramResult(
+            field="@timestamp",
+            interval="5m",
+            buckets=[
+                HistogramBucket(time=1704067200000, count=4),
+                HistogramBucket(time=1704067500000, count=0),
+                HistogramBucket(time=1704067800000, count=7),
+            ],
+        )
+
+    async def test_session_range_and_field_apply(self) -> None:
+        driver, client = _hist_driver("lucene")
+        await driver.set_session(
+            {"time_field": "ts", "time_from": "2024-01-01T00:00:00Z"}
+        )
+        await driver.histogram("logs | *", 40)
+        kwargs = client.search.call_args.kwargs
+        assert kwargs["query"]["bool"]["filter"] == [
+            {"range": {"ts": {"gte": "2024-01-01T00:00:00.000Z"}}}
+        ]
+        assert kwargs["aggs"]["histogram"]["auto_date_histogram"]["field"] == "ts"
+        assert "sort" not in kwargs
+
+    async def test_no_matches_yields_no_buckets(self) -> None:
+        driver, client = _hist_driver("lucene")
+        client.search.return_value = {
+            "aggregations": {"histogram": {"interval": "1s", "buckets": []}}
+        }
+        result = await driver.histogram("logs | *", 40)
+        assert result.buckets == []
+
+    async def test_bad_query_format_raises(self) -> None:
+        driver, _ = _hist_driver("lucene")
+        with pytest.raises(DriverError, match="<index> | <query>"):
+            await driver.histogram("no pipe here", 40)
+
+
+class TestHistogramEsql:
+    async def test_buckets_between_session_bounds(self) -> None:
+        driver, client = _hist_driver("esql")
+        await driver.set_session(
+            {"time_from": "2024-01-01T00:00:00Z", "time_to": "2024-01-01T01:00:00Z"}
+        )
+        client.esql.query.return_value = {
+            "columns": [{"name": "count"}, {"name": "time"}],
+            "values": [
+                [3, "2024-01-01T00:00:00.000Z"],
+                [2, "2024-01-01T00:15:00.000Z"],
+                [5, "2024-01-01T00:45:00.000Z"],
+            ],
+        }
+        result = await driver.histogram(
+            'FROM logs | WHERE level == "error" | STATS n = COUNT(*) BY host', 4
+        )
+        client.esql.query.assert_awaited_once_with(
+            query=(
+                'FROM logs | WHERE @timestamp >= TO_DATETIME("2024-01-01T00:00:00.000Z")'
+                ' AND @timestamp <= TO_DATETIME("2024-01-01T01:00:00.000Z")'
+                ' | WHERE level == "error"'
+                " | STATS count = COUNT(*) BY time = BUCKET(@timestamp, 4,"
+                ' "2024-01-01T00:00:00.000Z", "2024-01-01T01:00:00.000Z") | SORT time | LIMIT 1000'
+            ),
+            format="json",
+        )
+        assert result == HistogramResult(
+            field="@timestamp",
+            interval="15m",
+            buckets=[
+                HistogramBucket(time=1704067200000, count=3),
+                HistogramBucket(time=1704068100000, count=2),
+                HistogramBucket(time=1704069000000, count=0),
+                HistogramBucket(time=1704069900000, count=5),
+            ],
+        )
+
+    async def test_open_bounds_are_read_off_the_data(self) -> None:
+        driver, client = _hist_driver("esql")
+        client.esql.query.side_effect = [
+            {
+                "columns": [{"name": "lo"}, {"name": "hi"}],
+                "values": [["2024-01-01T00:00:00.000Z", "2024-01-01T02:00:00.000Z"]],
+            },
+            {
+                "columns": [{"name": "count"}, {"name": "time"}],
+                "values": [[1, "2024-01-01T00:00:00.000Z"]],
+            },
+        ]
+        result = await driver.histogram("FROM logs", 10)
+        first, second = [c.kwargs["query"] for c in client.esql.query.await_args_list]
+        assert (
+            first
+            == "FROM logs | STATS lo = MIN(@timestamp), hi = MAX(@timestamp) | LIMIT 1"
+        )
+        assert second == (
+            "FROM logs | STATS count = COUNT(*) BY time = BUCKET(@timestamp, 10,"
+            ' "2024-01-01T00:00:00.000Z", "2024-01-01T02:00:00.000Z") | SORT time | LIMIT 1000'
+        )
+        assert result == HistogramResult(
+            field="@timestamp",
+            interval="",
+            buckets=[HistogramBucket(time=1704067200000, count=1)],
+        )
+
+    async def test_no_rows_yields_no_buckets(self) -> None:
+        driver, client = _hist_driver("esql")
+        client.esql.query.return_value = {
+            "columns": [{"name": "lo"}, {"name": "hi"}],
+            "values": [[None, None]],
+        }
+        result = await driver.histogram("FROM logs", 10)
+        assert result.buckets == []
+        client.esql.query.assert_awaited_once()
+
+    async def test_custom_field_is_quoted(self) -> None:
+        driver, client = _hist_driver("esql")
+        await driver.set_session(
+            {
+                "time_field": "event-time",
+                "time_from": "2024-01-01T00:00:00Z",
+                "time_to": "2024-01-02T00:00:00Z",
+            }
+        )
+        client.esql.query.return_value = {"columns": [], "values": []}
+        await driver.histogram("FROM logs | LIMIT 5", 10)
+        query = client.esql.query.call_args.kwargs["query"]
+        assert "BUCKET(`event-time`, 10," in query
+        assert " | LIMIT 5 | STATS count" in query
+
+    async def test_sourceless_query_raises(self) -> None:
+        driver, _ = _hist_driver("esql")
+        with pytest.raises(DriverError, match="reads an index"):
+            await driver.histogram("ROW a = 1", 10)
+
+
+class TestHistogramDevTools:
+    async def test_is_rejected(self) -> None:
+        driver, _ = _hist_driver("dev_tools")
+        with pytest.raises(DriverError, match="Dev Tools"):
+            await driver.histogram("GET /logs/_search", 10)
+
+
+class TestFillGaps:
+    def test_calendar_steps_are_left_alone(self) -> None:
+        jan, feb, mar = 1704067200000, 1706745600000, 1709251200000
+        raw = [
+            HistogramBucket(jan, 1),
+            HistogramBucket(feb, 2),
+            HistogramBucket(mar, 3),
+        ]
+        result = _fill_gaps("@timestamp", raw)
+        assert result.buckets == raw
+        assert result.interval == ""
+
+    def test_fills_multiple_missing_steps(self) -> None:
+        raw = [
+            HistogramBucket(0, 1),
+            HistogramBucket(3000, 1),
+            HistogramBucket(4000, 1),
+        ]
+        result = _fill_gaps("@timestamp", raw)
+        assert [b.time for b in result.buckets] == [0, 1000, 2000, 3000, 4000]
+        assert [b.count for b in result.buckets] == [1, 0, 0, 1, 1]
+        assert result.interval == "1s"
+
+    def test_duration_labels(self) -> None:
+        assert _duration(500) == "500ms"
+        assert _duration(90_000) == "90s"
+        assert _duration(3_600_000) == "1h"
+        assert _duration(172_800_000) == "2d"

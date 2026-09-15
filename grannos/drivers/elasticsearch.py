@@ -15,6 +15,8 @@ from ..protocol import (
     EntityDescription,
     ExploreItem,
     FieldDescription,
+    HistogramBucket,
+    HistogramResult,
     NodeType,
     ParamType,
     ReadResult,
@@ -43,6 +45,11 @@ _PLAIN_IDENTIFIER_RE = re.compile(r"^[A-Za-z_@][A-Za-z0-9_@.]*$")
 _ESQL_SOURCE_RE = re.compile(r"^(from|ts|metrics)\b", re.IGNORECASE)
 _ESQL_SORT_RE = re.compile(r"^sort\b", re.IGNORECASE)
 _ESQL_LIMIT_RE = re.compile(r"^limit\b", re.IGNORECASE)
+_ESQL_STATS_RE = re.compile(r"^stats\b", re.IGNORECASE)
+# Explicit row cap on the generated histogram STATS — ES|QL's own default when
+# none is given, spelled out so the server does not warn about it. Well above
+# the bucket count the dispatcher allows.
+_ESQL_HISTOGRAM_LIMIT = 1000
 
 
 logger = logging.getLogger(__name__)
@@ -58,6 +65,7 @@ class ElasticsearchDriver(BaseDriver):
     """
 
     LABEL = "Elasticsearch"
+    SUPPORTS_HISTOGRAM = True
 
     FIND_PATHS = {
         NodeType.INDEX: [["*"]],
@@ -257,6 +265,13 @@ ahead of a trailing `LIMIT` so the limit takes the head of the sorted result. A
 query carrying its own `SORT` keeps it, and one that reads no index (`ROW`,
 `SHOW`) is left untouched.
 
+**Documents over time:** `execute.histogram` counts the documents a Lucene
+or ES|QL query matches per bucket of `time_field`, within the session time
+range — an `auto_date_histogram` on the same search in Lucene mode, and
+`STATS COUNT(*) BY BUCKET(...)` appended to the query (cut at its first
+`STATS`) in ES|QL mode. Dev Tools requests are sent as written and cannot be
+charted.
+
 **Resources:**
 
 ```
@@ -333,16 +348,28 @@ Describing an index returns field metadata from its mapping (name, type).
             raise DriverError(f"Unknown query_mode: {mode!r}")
 
     async def _execute_lucene(self, query: str) -> ReadResult:
+        kwargs, applied = self._lucene_search(query)
+        kwargs["size"] = _DEFAULT_SEARCH_SIZE
+        if sort := self._sort_clause():
+            kwargs["sort"] = sort
+            applied.append(f"sort={json.dumps(sort)}")
+        log_query(logger, f"{query} [{' '.join(applied)}]" if applied else query)
+        resp = await self._client.search(**kwargs)
+        return self._hits_to_result(resp)
+
+    def _lucene_search(self, query: str) -> tuple[dict[str, Any], list[str]]:
+        """The `search` arguments selecting the documents a Lucene query names.
+
+        Returns the index and query part of the call — no size or sort — and
+        the list of session settings folded in, for the query log.
+        """
         if " | " not in query:
             raise DriverError(
                 "Query must be in the format: <index> | <query>\n"
                 "Example: orders | status:open AND total:>50"
             )
         index, _, lucene = query.partition(" | ")
-        kwargs: dict[str, Any] = {
-            "index": index.strip(),
-            "size": _DEFAULT_SEARCH_SIZE,
-        }
+        kwargs: dict[str, Any] = {"index": index.strip()}
         applied = []
         # The session time range cannot ride along with `q` (a URI parameter),
         # so a bounded search restates the Lucene string as a `query_string`
@@ -358,12 +385,7 @@ Describing an index returns field metadata from its mapping (name, type).
                 }
             }
             applied.append(f"range={json.dumps(time_filter['range'])}")
-        if sort := self._sort_clause():
-            kwargs["sort"] = sort
-            applied.append(f"sort={json.dumps(sort)}")
-        log_query(logger, f"{query} [{' '.join(applied)}]" if applied else query)
-        resp = await self._client.search(**kwargs)
-        return self._hits_to_result(resp)
+        return kwargs, applied
 
     async def _execute_dev_tools(self, query: str) -> ReadResult:
         _VALID_METHODS = {"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD"}
@@ -412,6 +434,111 @@ Describing an index returns field metadata from its mapping (name, type).
         columns = [col["name"] for col in resp["columns"]]
         rows = resp["values"]
         return ReadResult(columns=columns, rows=rows, rows_total=len(rows))
+
+    async def histogram(self, query: str, buckets: int) -> HistogramResult:
+        mode = self.params.get("query_mode", "lucene")
+        if mode == "dev_tools":
+            raise DriverError(
+                "Histograms are not available in Dev Tools mode — a Dev Tools "
+                "request is sent exactly as written. Use the Lucene or ES|QL "
+                "query mode, or add a date_histogram aggregation to the request."
+            )
+        if mode not in ("lucene", "esql"):
+            raise DriverError(f"Unknown query_mode: {mode!r}")
+        try:
+            if mode == "lucene":
+                return await self._histogram_lucene(query, buckets)
+            return await self._histogram_esql(query, buckets)
+        except elasticsearch.ConnectionError as exc:
+            if self._ever_connected:
+                raise ConnectionLostError(str(exc)) from exc
+            raise DriverError(str(exc)) from exc
+        except elasticsearch.ApiError as exc:
+            raise (
+                _esql_error(exc) if mode == "esql" else DriverError(str(exc))
+            ) from exc
+
+    async def _histogram_lucene(self, query: str, buckets: int) -> HistogramResult:
+        """Bucket a Lucene query's matches with an `auto_date_histogram`.
+
+        Elasticsearch picks a round interval yielding at most `buckets`
+        buckets over the span the matches cover, and fills the gaps with
+        empty ones — so the session range needs no special handling: set, it
+        is already in the query; unset, the span is the data's own.
+        """
+        field = self._time_field()
+        kwargs, applied = self._lucene_search(query)
+        kwargs["size"] = 0
+        kwargs["track_total_hits"] = False
+        kwargs["aggs"] = {
+            "histogram": {"auto_date_histogram": {"field": field, "buckets": buckets}}
+        }
+        applied.append(f"histogram={field}/{buckets}")
+        log_query(logger, f"{query} [{' '.join(applied)}]")
+        resp = await self._client.search(**kwargs)
+        self._ever_connected = True
+        agg = resp.get("aggregations", {}).get("histogram", {})
+        return HistogramResult(
+            field=field,
+            interval=str(agg.get("interval") or ""),
+            buckets=[
+                HistogramBucket(time=int(b["key"]), count=int(b["doc_count"]))
+                for b in agg.get("buckets", [])
+            ],
+        )
+
+    async def _histogram_esql(self, query: str, buckets: int) -> HistogramResult:
+        """Bucket an ES|QL query's rows with `STATS COUNT(*) BY BUCKET(...)`.
+
+        The query is kept up to its first `STATS` — the last point where the
+        rows are still documents and the time field is still in scope — with
+        the session time range spliced in as for `execute`. `BUCKET`'s
+        target-count form needs the span it divides, so a bound the session
+        leaves open is first read off the data with `MIN`/`MAX`. ES|QL emits
+        no bucket for an empty interval; those are filled in afterwards.
+        """
+        esql = query.strip()
+        commands = _split_commands(esql)
+        if not _ESQL_SOURCE_RE.match(esql[slice(*commands[0])]):
+            raise DriverError("A histogram needs a query that reads an index (FROM …)")
+        if clause := self._esql_time_clause():
+            at = commands[0][1]
+            esql = f"{esql[:at]} | WHERE {clause}{esql[at:]}"
+            commands = _split_commands(esql)
+        for start, end in commands:
+            if _ESQL_STATS_RE.match(esql[start:end]):
+                esql = esql[:start].rstrip().rstrip("|").rstrip()
+                break
+        field = self._time_field()
+        ident = _esql_identifier(field)
+        bounds = self._time_bounds()
+        lo, hi = bounds.get("gte"), bounds.get("lte")
+        if lo is None or hi is None:
+            extent = await self._esql(
+                f"{esql} | STATS lo = MIN({ident}), hi = MAX({ident}) | LIMIT 1"
+            )
+            row = extent["values"][0] if extent["values"] else [None, None]
+            lo = lo or row[0]
+            hi = hi or row[1]
+            if lo is None or hi is None:
+                return HistogramResult(field=field, interval="", buckets=[])
+        resp = await self._esql(
+            f"{esql} | STATS count = COUNT(*) BY time = BUCKET({ident}, {buckets},"
+            f' "{lo}", "{hi}") | SORT time | LIMIT {_ESQL_HISTOGRAM_LIMIT}'
+        )
+        raw = [
+            HistogramBucket(time=_epoch_ms(time), count=int(count))
+            for count, time in resp["values"]
+            if time is not None
+        ]
+        return _fill_gaps(field, raw)
+
+    async def _esql(self, esql: str) -> dict[str, Any]:
+        """Run one ES|QL statement, logged, returning the raw JSON response."""
+        log_query(logger, esql)
+        resp = await self._client.esql.query(query=esql, format="json")
+        self._ever_connected = True
+        return resp  # ty: ignore[invalid-return-type]
 
     def _apply_esql_settings(self, query: str) -> str:
         """Fold the session time range and sort field into an ES|QL query.
@@ -697,6 +824,46 @@ def _split_commands(query: str) -> list[tuple[int, int]]:
         for s, e in spans
         for text in [query[s:e]]
     ]
+
+
+def _epoch_ms(value: Any) -> int:
+    """Unix milliseconds for a datetime ES|QL returned (ISO string or number)."""
+    if isinstance(value, (int, float)):
+        return int(value)
+    text = str(value)
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    return int(datetime.fromisoformat(text).timestamp() * 1000)
+
+
+def _fill_gaps(field: str, buckets: list[HistogramBucket]) -> HistogramResult:
+    """Make `buckets` contiguous, inserting empty ones where ES|QL emitted none.
+
+    The interval is taken as the smallest gap between neighbours, and gaps
+    are filled only when every gap is a whole multiple of it — true of any
+    fixed interval. A calendar interval (months vary in length) does not
+    pass that test and is left as it came, with no interval reported.
+    """
+    if len(buckets) < 2:
+        return HistogramResult(field=field, interval="", buckets=buckets)
+    steps = [b.time - a.time for a, b in zip(buckets, buckets[1:])]
+    step = min(steps)
+    if step <= 0 or any(s % step for s in steps):
+        return HistogramResult(field=field, interval="", buckets=buckets)
+    filled: list[HistogramBucket] = [buckets[0]]
+    for bucket in buckets[1:]:
+        while filled[-1].time + step < bucket.time:
+            filled.append(HistogramBucket(time=filled[-1].time + step, count=0))
+        filled.append(bucket)
+    return HistogramResult(field=field, interval=_duration(step), buckets=filled)
+
+
+def _duration(ms: int) -> str:
+    """Format a millisecond span the way ES names intervals: `5m`, `1h`, `1d`."""
+    for unit, size in (("d", 86_400_000), ("h", 3_600_000), ("m", 60_000), ("s", 1000)):
+        if ms % size == 0:
+            return f"{ms // size}{unit}"
+    return f"{ms}ms"
 
 
 def _esql_error(exc: elasticsearch.ApiError) -> DriverError:

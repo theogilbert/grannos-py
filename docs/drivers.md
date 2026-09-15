@@ -292,6 +292,17 @@ Any Elasticsearch REST endpoint is accepted — the response is returned as a
 flat table. Search responses unpack `hits.hits`; all other responses are
 flattened as a single row.
 
+**Documents over time:** the driver answers `execute.histogram` for Lucene
+and ES|QL queries, counting the matching documents per bucket of
+`time_field` within the session time range. In Lucene mode this is an
+`auto_date_histogram` aggregation on the same search (with `size: 0`), so
+the interval is a round one Elasticsearch picks for the requested bucket
+count. In ES|QL mode the query is kept up to its first `STATS` and
+`| STATS COUNT(*) BY BUCKET(<time_field>, <buckets>, <from>, <to>)`
+appended; a bound the session leaves open is first read off the data with
+`MIN`/`MAX`, and empty buckets are filled in. Dev Tools requests are sent
+as written and cannot be charted.
+
 **Time range and sorting:** five session settings — changeable any time via
 `session.set`, no reconnect needed — apply to every Lucene and ES|QL query.
 Dev Tools queries are sent exactly as written.

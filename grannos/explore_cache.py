@@ -11,6 +11,7 @@ from .drivers.base import (
     BaseDriver,
     DriverSettings,
     FindNotSupported,
+    HistogramResult,
     ReadResult,
     WriteResult,
 )
@@ -72,6 +73,9 @@ class CachingDriver(BaseDriver):
 
     async def execute(self, query: str, binds: list[Any]) -> ReadResult | WriteResult:
         return await self._inner.execute(query, binds)
+
+    async def histogram(self, query: str, buckets: int) -> HistogramResult:
+        return await self._inner.histogram(query, buckets)
 
     async def set_session(self, values: dict[str, Any]) -> None:
         await self._inner.set_session(values)

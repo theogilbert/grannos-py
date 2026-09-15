@@ -380,13 +380,26 @@ class TestExploreList:
         )
         items = await driver.explore_list(["metrics", "up"])
         assert sorted(i.name for i in items) == ["instance", "job"]
-        assert all(not i.expandable for i in items)
+        assert all(i.type == "label" and i.expandable for i in items)
 
-    async def test_label_path_returns_empty(self) -> None:
-        driver, _ = _driver_with_response({"status": "success", "data": []})
-        assert await driver.explore_list(["metrics", "up", "job"]) == []
+    async def test_label_path_lists_its_values_for_the_metric(self) -> None:
+        driver, session = _driver_with_response(
+            {"status": "success", "data": ["node", "prometheus"]}
+        )
+        items = await driver.explore_list(["metrics", "up", "job"])
+        assert [i.name for i in items] == ["node", "prometheus"]
+        assert all(i.type == "label_value" and not i.expandable for i in items)
+        args, kwargs = session.get.call_args
+        assert args[0] == "http://localhost:9090/api/v1/label/job/values"
+        assert kwargs["params"] == {"match[]": "up", "limit": "1000"}
 
-    async def test_unknown_path_returns_empty(self) -> None:
+    async def test_label_path_url_encodes_the_label(self) -> None:
+        driver, session = _driver_with_response({"status": "success", "data": []})
+        await driver.explore_list(["jobs", "prometheus", "up", "a/b"])
+        args, _ = session.get.call_args
+        assert args[0] == "http://localhost:9090/api/v1/label/a%2Fb/values"
+
+    async def test_label_value_path_returns_empty(self) -> None:
         driver, _ = _driver_with_response({"status": "success", "data": []})
         assert await driver.explore_list(["metrics", "up", "job", "prometheus"]) == []
 
@@ -432,7 +445,7 @@ class TestExploreList:
         )
         items = await driver.explore_list(["jobs", "prometheus", "up"])
         assert sorted(i.name for i in items) == ["instance", "job"]
-        assert all(i.type == "label" and not i.expandable for i in items)
+        assert all(i.type == "label" and i.expandable for i in items)
         args, kwargs = session.get.call_args
         assert args[0] == "http://localhost:9090/api/v1/labels"
         assert kwargs["params"] == {"match[]": "up"}

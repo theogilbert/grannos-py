@@ -299,3 +299,74 @@ class TestSessionTimeRange:
         result = await esql_driver.execute(f"FROM {_INDEX} | LIMIT 10", [])
         assert isinstance(result, ReadResult)
         assert _names(result) == ["Old"]
+
+
+_HOURLY_DOCS = [
+    {"name": f"d{i}", "status": "active", "created_at": f"2024-01-01T{h:02d}:00:00Z"}
+    for i, h in enumerate([0, 0, 0, 1, 3, 3])
+]
+
+
+class TestHistogram:
+    async def test_lucene_buckets_contiguously(
+        self, driver: ElasticsearchDriver
+    ) -> None:
+        await _index_docs(driver, _HOURLY_DOCS)
+        await driver.set_session({"time_field": "created_at"})
+        result = await driver.histogram(f"{_INDEX} | status:active", 4)
+        assert result.field == "created_at"
+        assert result.interval  # ES names the round interval it chose
+        assert sum(b.count for b in result.buckets) == len(_HOURLY_DOCS)
+        steps = {b.time - a.time for a, b in zip(result.buckets, result.buckets[1:])}
+        assert len(steps) == 1  # contiguous: the empty 02:00 hour is present
+
+    async def test_lucene_honours_time_range(self, driver: ElasticsearchDriver) -> None:
+        await _index_docs(driver, _HOURLY_DOCS)
+        await driver.set_session(
+            {"time_field": "created_at", "time_from": "2024-01-01T02:30:00Z"}
+        )
+        result = await driver.histogram(f"{_INDEX} | *", 4)
+        assert sum(b.count for b in result.buckets) == 2
+
+    async def test_esql_buckets_between_data_bounds(
+        self, driver: ElasticsearchDriver, esql_driver: ElasticsearchDriver
+    ) -> None:
+        await _index_docs(driver, _HOURLY_DOCS)
+        await esql_driver.set_session({"time_field": "created_at"})
+        result = await esql_driver.histogram(
+            f'FROM {_INDEX} | WHERE status == "active" | STATS n = COUNT(*)', 4
+        )
+        assert sum(b.count for b in result.buckets) == len(_HOURLY_DOCS)
+        assert result.buckets[0].time == 1704067200000  # 2024-01-01T00:00Z
+        assert [b.count for b in result.buckets][:4] == [3, 1, 0, 2]
+        assert result.interval == "1h"
+
+    async def test_esql_with_session_bounds(
+        self, driver: ElasticsearchDriver, esql_driver: ElasticsearchDriver
+    ) -> None:
+        await _index_docs(driver, _HOURLY_DOCS)
+        await esql_driver.set_session(
+            {
+                "time_field": "created_at",
+                "time_from": "2024-01-01T00:00:00Z",
+                "time_to": "2024-01-01T04:00:00Z",
+            }
+        )
+        result = await esql_driver.histogram(f"FROM {_INDEX}", 4)
+        assert sum(b.count for b in result.buckets) == len(_HOURLY_DOCS)
+
+    async def test_esql_no_matches(
+        self, driver: ElasticsearchDriver, esql_driver: ElasticsearchDriver
+    ) -> None:
+        await _index_docs(driver, _HOURLY_DOCS)
+        await esql_driver.set_session({"time_field": "created_at"})
+        result = await esql_driver.histogram(
+            f'FROM {_INDEX} | WHERE status == "nope"', 4
+        )
+        assert result.buckets == []
+
+    async def test_dev_tools_is_rejected(
+        self, dev_tools_driver: ElasticsearchDriver
+    ) -> None:
+        with pytest.raises(DriverError, match="Dev Tools"):
+            await dev_tools_driver.histogram(f"GET /{_INDEX}/_search", 4)

@@ -16,6 +16,7 @@ from .protocol import (
     DescribeResult,
     DownloadResult,
     DriverHelpResult,
+    ExecuteHistogramResult,
     ExecuteReadResult,
     ExecuteWriteResult,
     ExploreDescribeResult,
@@ -184,6 +185,7 @@ class Dispatcher:
     ) -> dict[Method, Callable[..., Awaitable[MethodResult]]]:
         return {
             Method.EXECUTE: self._handle_execute,
+            Method.EXECUTE_HISTOGRAM: self._handle_execute_histogram,
             Method.EXPLORE_LIST: self._handle_explore_list,
             Method.EXPLORE_FIND: self._handle_explore_find,
             Method.EXPLORE_DESCRIBE: self._handle_explore_describe,
@@ -272,6 +274,26 @@ class Dispatcher:
             rows_total=result.rows_total,
             duration_ms=duration_ms,
             messages=result.messages,
+        )
+
+    async def _handle_execute_histogram(
+        self,
+        conn: Connection,
+        params: dict[str, Any],
+        send_progress: ProgressCallback,
+    ) -> ExecuteHistogramResult:
+        query: str = self._require_param(params, "query")
+        buckets = _parse_buckets(params.get("buckets"))
+        t0 = time.perf_counter()
+        result = await self._reconnect_and_retry(
+            conn, lambda: conn.driver.histogram(query, buckets), send_progress
+        )
+        duration_ms = round((time.perf_counter() - t0) * 1000, 3)
+        return ExecuteHistogramResult(
+            field=result.field,
+            interval=result.interval,
+            buckets=result.buckets,
+            duration_ms=duration_ms,
         )
 
     async def _handle_explore_list(
@@ -426,6 +448,23 @@ class Dispatcher:
         if key not in params:
             raise DispatchError(f"Missing required param: {key!r}")
         return params[key]
+
+
+DEFAULT_HISTOGRAM_BUCKETS = 50
+MAX_HISTOGRAM_BUCKETS = 500
+
+
+def _parse_buckets(raw: Any) -> int:
+    """Parse ``execute.histogram``'s optional ``buckets`` param.
+
+    Raises:
+        DispatchError: If *raw* is present but not a positive integer.
+    """
+    if raw is None:
+        return DEFAULT_HISTOGRAM_BUCKETS
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
+        raise DispatchError(f"buckets must be a positive integer, got {raw!r}")
+    return min(raw, MAX_HISTOGRAM_BUCKETS)
 
 
 def _parse_scopes(raw: Any) -> list[SearchScope]:

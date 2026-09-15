@@ -19,7 +19,7 @@ from uuid import UUID
 logger = logging.getLogger(__name__)
 
 
-PROTOCOL_VERSION = "1.0"
+PROTOCOL_VERSION = "1.1"
 """Wire-protocol version this server implements, as ``"<major>.<minor>"``.
 
 Bump ``major`` for changes that break existing clients (removed/renamed
@@ -38,6 +38,7 @@ class Method(StrEnum):
     CONNECT = "connect"
     DISCONNECT = "disconnect"
     EXECUTE = "execute"
+    EXECUTE_HISTOGRAM = "execute.histogram"
     CANCEL = "cancel"
     EXPLORE_LIST = "explore.list"
     EXPLORE_FIND = "explore.find"
@@ -118,6 +119,8 @@ class NodeType(StrEnum):
     COLLECTION = "collection"
     LABEL = "label"
     """Graph node label (Neo4j), or a metric label (Prometheus)."""
+    LABEL_VALUE = "label_value"
+    """One value of a metric label (Prometheus)."""
     RELATIONSHIP_TYPE = "relationship_type"
     """Graph relationship type (Neo4j)."""
 
@@ -569,6 +572,34 @@ class WriteResult:
 
 
 @dataclass
+class HistogramBucket:
+    """One bar of a :class:`HistogramResult`."""
+
+    time: int
+    """Start of the bucket, as Unix milliseconds (UTC)."""
+    count: int
+    """Documents whose time field falls in ``[time, time + interval)``."""
+
+
+@dataclass
+class HistogramResult:
+    """Result of a driver's :meth:`~grannos.drivers.base.BaseDriver.histogram`.
+
+    Buckets are contiguous and ascending: every interval between the first and
+    the last is present, an empty one carrying a count of zero, so a client
+    can draw them side by side without knowing the interval.
+    """
+
+    field: str
+    """The time field the documents were bucketed on."""
+    interval: str
+    """Width of every bucket, as a short duration such as ``"5m"`` or ``"1d"``;
+    empty when the driver could not tell (a single bucket, say)."""
+    buckets: list[HistogramBucket]
+    """Buckets in ascending time order. Empty when the query matched nothing."""
+
+
+@dataclass
 class DriverParamChoice:
     """A single option within an ``"enum"`` driver parameter."""
 
@@ -644,6 +675,10 @@ class Driver:
     use them to prioritise matching drivers in a connection picker.  An empty
     list means the driver has no language affinity and is treated as generic.
     """
+    supports_histogram: bool = False
+    """Whether this driver answers ``execute.histogram`` — a count of matching
+    documents per time bucket for a query. Clients should offer a histogram
+    view only for drivers that do."""
 
 
 # --- Method results -------------------------------------------------------
@@ -728,6 +763,21 @@ class ExecuteWriteResult:
 
 
 @dataclass
+class ExecuteHistogramResult:
+    """Result of ``execute.histogram``."""
+
+    field: str
+    """The time field the documents were bucketed on."""
+    interval: str
+    """Width of every bucket, as a short duration such as ``"5m"``; empty when
+    unknown."""
+    buckets: list[HistogramBucket]
+    """Contiguous buckets in ascending time order — see :class:`HistogramResult`."""
+    duration_ms: float
+    """Wall-clock execution time in milliseconds, measured server-side."""
+
+
+@dataclass
 class ExploreListResult:
     """Result of ``explore.list``."""
 
@@ -787,6 +837,7 @@ MethodResult = (
     | OkResult
     | ExecuteReadResult
     | ExecuteWriteResult
+    | ExecuteHistogramResult
     | ExploreListResult
     | ExploreFindResult
     | ExploreDescribeResult

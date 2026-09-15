@@ -122,6 +122,14 @@ class TestExploreDownloadDefault:
             await driver.explore_download(["a"], None)
 
 
+class TestHistogramDefault:
+    async def test_raises_driver_error(self) -> None:
+        driver = _make_driver()
+        assert _StubDriver.SUPPORTS_HISTOGRAM is False
+        with pytest.raises(DriverError, match="does not support histograms"):
+            await driver.histogram("anything", 50)
+
+
 class TestBuildColumnSamples:
     def test_dedupes_repeated_values(self) -> None:
         rows = [("x",), ("y",), ("x",)]

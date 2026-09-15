@@ -15,6 +15,7 @@ from ..protocol import (
     Language,
     LobPlaceholder,
     NodeType,
+    HistogramResult,
     ReadResult,
     SearchScope,
     TableReference,
@@ -148,6 +149,10 @@ class BaseDriver(ABC):
     can skip write-related connection settings (e.g. "always allow writes")
     that would otherwise never apply.
     """
+
+    SUPPORTS_HISTOGRAM: ClassVar[bool] = False
+    """Whether this driver implements :meth:`histogram`. Advertised to clients
+    as ``supports_histogram`` so they only offer the view where it works."""
 
     _LOB_CACHE_MAX: ClassVar[int] = 200
     """Bound on the number of LobPlaceholder values kept in memory for later
@@ -356,6 +361,24 @@ class BaseDriver(ABC):
         return await asyncio.get_running_loop().run_in_executor(
             None, _write_or_encode, data, filename, content_type, dest_path
         )
+
+    async def histogram(self, query: str, buckets: int) -> HistogramResult:
+        """Count the documents `query` matches per time bucket.
+
+        The same query string ``execute`` takes, answered with a count per
+        bucket of its time field instead of its rows — the shape behind a
+        "documents over time" chart. Only drivers with ``SUPPORTS_HISTOGRAM``
+        implement it.
+
+        Args:
+            query: The query, exactly as it would be passed to :meth:`execute`.
+            buckets: Target number of buckets. A driver picks a round interval
+                that yields about this many; the actual count may differ.
+
+        Raises:
+            DriverError: If this driver has no notion of a time histogram.
+        """
+        raise DriverError(f"{type(self).__name__} does not support histograms")
 
     async def set_session(self, values: dict[str, Any]) -> None:
         """Update one or more runtime session settings declared in SESSION_PARAMS.

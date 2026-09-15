@@ -22,11 +22,14 @@ from grannos.protocol import (
     MessageLevel,
     ParamType,
     ExecuteMessage,
+    ExecuteHistogramResult,
     ExecuteReadResult,
     ExecuteWriteResult,
     ExploreDescribeResult,
     ExploreFindResult,
     ExploreListResult,
+    HistogramBucket,
+    HistogramResult,
     OkResult,
     ReadResult,
     SearchScope,
@@ -208,6 +211,24 @@ class TestCapabilities:
             pytest.skip("prometheus driver not installed")
         assert drivers_by_name["prometheus"].supports_writes is False
 
+    async def test_sqlite_does_not_support_histograms(
+        self, dispatcher: Dispatcher
+    ) -> None:
+        result = await dispatcher.dispatch(Method.CAPABILITIES, {}, noop_progress)
+        assert isinstance(result, CapabilitiesResult)
+        sqlite = next(t for t in result.drivers if t.driver == "sqlite")
+        assert sqlite.supports_histogram is False
+
+    async def test_elasticsearch_supports_histograms(
+        self, dispatcher: Dispatcher
+    ) -> None:
+        result = await dispatcher.dispatch(Method.CAPABILITIES, {}, noop_progress)
+        assert isinstance(result, CapabilitiesResult)
+        drivers_by_name = {t.driver: t for t in result.drivers}
+        if "elasticsearch" not in drivers_by_name:
+            pytest.skip("elasticsearch driver not installed")
+        assert drivers_by_name["elasticsearch"].supports_histogram is True
+
 
 class TestDriverHelp:
     async def test_should_return_markdown_content(self, dispatcher: Dispatcher) -> None:
@@ -292,6 +313,70 @@ class TestDispatch:
     ) -> None:
         with pytest.raises(DispatchError, match="Unknown method"):
             await dispatcher.dispatch("no_such", {}, noop_progress)  # type: ignore
+
+
+class TestExecuteHistogram:
+    async def test_should_return_buckets_with_duration(
+        self, connected: tuple[Dispatcher, str, AsyncMock]
+    ) -> None:
+        disp, conn_id, driver = connected
+        buckets = [
+            HistogramBucket(time=0, count=3),
+            HistogramBucket(time=60000, count=0),
+        ]
+        driver.histogram.return_value = HistogramResult(
+            field="@timestamp", interval="1m", buckets=buckets
+        )
+        result = await disp.dispatch(
+            Method.EXECUTE_HISTOGRAM,
+            {"connection_id": conn_id, "query": "logs | *"},
+            noop_progress,
+        )
+        assert result == ExecuteHistogramResult(
+            field="@timestamp", interval="1m", buckets=buckets, duration_ms=ANY
+        )
+        driver.histogram.assert_awaited_once_with("logs | *", 50)
+
+    async def test_passes_bucket_count_through_capped(
+        self, connected: tuple[Dispatcher, str, AsyncMock]
+    ) -> None:
+        disp, conn_id, driver = connected
+        driver.histogram.return_value = HistogramResult(
+            field="@timestamp", interval="", buckets=[]
+        )
+        await disp.dispatch(
+            Method.EXECUTE_HISTOGRAM,
+            {"connection_id": conn_id, "query": "logs | *", "buckets": 120},
+            noop_progress,
+        )
+        driver.histogram.assert_awaited_with("logs | *", 120)
+        await disp.dispatch(
+            Method.EXECUTE_HISTOGRAM,
+            {"connection_id": conn_id, "query": "logs | *", "buckets": 9999},
+            noop_progress,
+        )
+        driver.histogram.assert_awaited_with("logs | *", 500)
+
+    async def test_rejects_bad_bucket_count(
+        self, connected: tuple[Dispatcher, str, AsyncMock]
+    ) -> None:
+        disp, conn_id, _ = connected
+        for bad in (0, -1, "10", True):
+            with pytest.raises(DispatchError, match="buckets"):
+                await disp.dispatch(
+                    Method.EXECUTE_HISTOGRAM,
+                    {"connection_id": conn_id, "query": "logs | *", "buckets": bad},
+                    noop_progress,
+                )
+
+    async def test_requires_query(
+        self, connected: tuple[Dispatcher, str, AsyncMock]
+    ) -> None:
+        disp, conn_id, _ = connected
+        with pytest.raises(DispatchError, match="query"):
+            await disp.dispatch(
+                Method.EXECUTE_HISTOGRAM, {"connection_id": conn_id}, noop_progress
+            )
 
 
 class TestExecute:

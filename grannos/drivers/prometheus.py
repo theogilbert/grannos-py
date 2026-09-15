@@ -35,6 +35,12 @@ from .base import BaseDriver, ConnectionLostError, DriverError, DriverSettings
 
 _DEFAULT_URL = "http://localhost:9090"
 
+# How many values a label lists under a metric. A high-cardinality label
+# (`instance`, request ids) can carry far more, and neither a tree node nor a
+# completion popup is the place for them; `limit` is honoured by Prometheus
+# from 2.51 and ignored, harmlessly, before.
+_LABEL_VALUES_LIMIT = 1000
+
 _DURATION_UNITS = {
     "ms": 0.001,
     "s": 1,
@@ -141,15 +147,21 @@ Scalar/string results return a single `timestamp`/`value` row. A `value` of `NaN
 ├── metrics
 │   └── <metric>
 │       └── <label>
+│           └── <value>
 ├── jobs
 │   └── <job>
 │       └── <metric>
 │           └── <label>
+│               └── <value>
 ├── configuration
 └── runtime
 ```
 
 Requires Prometheus >= 2.24 (`/api/v1/labels` with `match[]` support).
+
+A label expands to its values for that metric (`/api/v1/label/<label>/values`
+with `match[]=<metric>`), the first 1000 of them in the order Prometheus
+returns — the same listing a query bar completes a matcher's value from.
 
 A metric reached by drilling into a job (`["jobs", job, metric]`) behaves
 identically to the equivalent top-level `["metrics", metric]` node —
@@ -317,9 +329,18 @@ job name; instance/job already group the record).
             case ["metrics", metric] | ["jobs", _, metric]:
                 labels = await self._get("/api/v1/labels", {"match[]": metric})
                 return [
-                    ExploreItem(name=label, type="label", expandable=False)
+                    ExploreItem(name=label, type="label", expandable=True)
                     for label in sorted(labels)
                     if label != "__name__"
+                ]
+            case ["metrics", metric, label] | ["jobs", _, metric, label]:
+                values = await self._get(
+                    f"/api/v1/label/{quote(label, safe='')}/values",
+                    {"match[]": metric, "limit": str(_LABEL_VALUES_LIMIT)},
+                )
+                return [
+                    ExploreItem(name=value, type="label_value", expandable=False)
+                    for value in values
                 ]
             case ["jobs"]:
                 data = await self._get("/api/v1/targets", {})
