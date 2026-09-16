@@ -593,8 +593,8 @@ class HistogramResult:
     field: str
     """The time field the documents were bucketed on."""
     interval: str
-    """Width of every bucket, as a short duration such as ``"5m"`` or ``"1d"``;
-    empty when the driver could not tell (a single bucket, say)."""
+    """Width of every bucket, as a short duration such as ``"5m"``, ``"1d"``
+    or ``"9m36s"``; empty when the driver could not tell."""
     buckets: list[HistogramBucket]
     """Buckets in ascending time order. Empty when the query matched nothing."""
 

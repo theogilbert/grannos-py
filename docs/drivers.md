@@ -294,14 +294,17 @@ flattened as a single row.
 
 **Documents over time:** the driver answers `execute.histogram` for Lucene
 and ES|QL queries, counting the matching documents per bucket of
-`time_field` within the session time range. In Lucene mode this is an
-`auto_date_histogram` aggregation on the same search (with `size: 0`), so
-the interval is a round one Elasticsearch picks for the requested bucket
-count. In ES|QL mode the query is kept up to its first `STATS` and
-`| STATS COUNT(*) BY BUCKET(<time_field>, <buckets>, <from>, <to>)`
-appended; a bound the session leaves open is first read off the data with
-`MIN`/`MAX`, and empty buckets are filled in. Dev Tools requests are sent
-as written and cannot be charted.
+`time_field` within the session time range. The bucket width is the range
+divided into the requested count — not a round interval — so a chart fills
+every column asked for (or one fewer, since buckets are aligned to the
+epoch rather than to the range's start). A bound the session leaves open is
+first read off the matches with `min`/`max`. In Lucene mode the chart is a
+fixed-interval `date_histogram` aggregation on the same search (with
+`size: 0`), `extended_bounds` pinning it to the range. In ES|QL mode the
+query is kept up to its first `STATS` and
+`| STATS COUNT(*) BY BUCKET(<time_field>, <width> milliseconds)` appended;
+empty buckets, which ES|QL omits, are filled in out to the range's edges.
+Dev Tools requests are sent as written and cannot be charted.
 
 **Time range and sorting:** five session settings — changeable any time via
 `session.set`, no reconnect needed — apply to every Lucene and ES|QL query.

@@ -315,10 +315,11 @@ class TestHistogram:
         await driver.set_session({"time_field": "created_at"})
         result = await driver.histogram(f"{_INDEX} | status:active", 4)
         assert result.field == "created_at"
-        assert result.interval  # ES names the round interval it chose
+        assert result.interval == "1h"  # the 3h span cut four ways
         assert sum(b.count for b in result.buckets) == len(_HOURLY_DOCS)
+        assert 3 <= len(result.buckets) <= 4  # every column asked for, or one short
         steps = {b.time - a.time for a, b in zip(result.buckets, result.buckets[1:])}
-        assert len(steps) == 1  # contiguous: the empty 02:00 hour is present
+        assert steps == {3_600_001}  # contiguous: the empty 02:00 hour is present
 
     async def test_lucene_honours_time_range(self, driver: ElasticsearchDriver) -> None:
         await _index_docs(driver, _HOURLY_DOCS)
@@ -337,9 +338,12 @@ class TestHistogram:
             f'FROM {_INDEX} | WHERE status == "active" | STATS n = COUNT(*)', 4
         )
         assert sum(b.count for b in result.buckets) == len(_HOURLY_DOCS)
-        assert result.buckets[0].time == 1704067200000  # 2024-01-01T00:00Z
-        assert [b.count for b in result.buckets][:4] == [3, 1, 0, 2]
-        assert result.interval == "1h"
+        assert result.interval == "1h"  # the 3h span cut four ways
+        # Buckets are aligned to the epoch, so the first starts within one
+        # width before the first document.
+        first = result.buckets[0].time
+        assert 1704067200000 - 3_600_001 < first <= 1704067200000
+        assert [b.count for b in result.buckets] == [3, 1, 0, 2]
 
     async def test_esql_with_session_bounds(
         self, driver: ElasticsearchDriver, esql_driver: ElasticsearchDriver
@@ -354,6 +358,7 @@ class TestHistogram:
         )
         result = await esql_driver.histogram(f"FROM {_INDEX}", 4)
         assert sum(b.count for b in result.buckets) == len(_HOURLY_DOCS)
+        assert 3 <= len(result.buckets) <= 4  # the range's edges, not the data's
 
     async def test_esql_no_matches(
         self, driver: ElasticsearchDriver, esql_driver: ElasticsearchDriver

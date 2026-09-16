@@ -372,8 +372,10 @@ class BaseDriver(ABC):
 
         Args:
             query: The query, exactly as it would be passed to :meth:`execute`.
-            buckets: Target number of buckets. A driver picks a round interval
-                that yields about this many; the actual count may differ.
+            buckets: How many buckets to divide the time span into. A driver
+                returns at most this many, and as near it as its bucket
+                alignment allows — a client can size the count to the
+                columns it has and expect them filled.
 
         Raises:
             DriverError: If this driver has no notion of a time histogram.

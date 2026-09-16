@@ -463,28 +463,58 @@ Describing an index returns field metadata from its mapping (name, type).
             ) from exc
 
     async def _histogram_lucene(self, query: str, buckets: int) -> HistogramResult:
-        """Bucket a Lucene query's matches with an `auto_date_histogram`.
+        """Bucket a Lucene query's matches with a fixed-interval `date_histogram`.
 
-        Elasticsearch picks a round interval yielding at most `buckets`
-        buckets over the span the matches cover, and fills the gaps with
-        empty ones — so the session range needs no special handling: set, it
-        is already in the query; unset, the span is the data's own.
+        The interval is the span divided into `buckets` (see `_bucket_step`),
+        so the chart always fills the columns asked for — at the price of a
+        round interval. The span is the session time range; a bound it leaves
+        open is first read off the matches with `min`/`max` aggregations.
+        `extended_bounds` then pins the histogram to that span, empty buckets
+        included, so a range wider than its data still charts edge to edge.
         """
         field = self._time_field()
         kwargs, applied = self._lucene_search(query)
         kwargs["size"] = 0
         kwargs["track_total_hits"] = False
+        lo, hi = self._time_bounds_ms()
+        if lo is None or hi is None:
+            extent_kwargs: dict[str, Any] = dict(
+                kwargs,
+                aggs={"lo": {"min": {"field": field}}, "hi": {"max": {"field": field}}},
+            )
+            log_query(logger, f"{query} [{' '.join([*applied, f'extent={field}'])}]")
+            resp = await self._client.search(**extent_kwargs)
+            self._ever_connected = True
+            aggs = resp.get("aggregations", {})
+            lo = lo if lo is not None else _agg_ms(aggs.get("lo"))
+            hi = hi if hi is not None else _agg_ms(aggs.get("hi"))
+            if lo is None or hi is None:
+                return HistogramResult(field=field, interval="", buckets=[])
+        if hi < lo:
+            return HistogramResult(field=field, interval="", buckets=[])
+        step = _bucket_step(lo, hi, buckets)
         kwargs["aggs"] = {
-            "histogram": {"auto_date_histogram": {"field": field, "buckets": buckets}}
+            "histogram": {
+                "date_histogram": {
+                    "field": field,
+                    "fixed_interval": f"{step}ms",
+                    "min_doc_count": 0,
+                    "format": "strict_date_optional_time",
+                    "extended_bounds": {
+                        "min": _es_datetime_ms(lo),
+                        "max": _es_datetime_ms(hi),
+                    },
+                }
+            }
         }
-        applied.append(f"histogram={field}/{buckets}")
+        applied.append(f"histogram={field}/{step}ms")
         log_query(logger, f"{query} [{' '.join(applied)}]")
         resp = await self._client.search(**kwargs)
         self._ever_connected = True
         agg = resp.get("aggregations", {}).get("histogram", {})
         return HistogramResult(
             field=field,
-            interval=str(agg.get("interval") or ""),
+            interval=_duration(step),
             buckets=[
                 HistogramBucket(time=int(b["key"]), count=int(b["doc_count"]))
                 for b in agg.get("buckets", [])
@@ -496,10 +526,11 @@ Describing an index returns field metadata from its mapping (name, type).
 
         The query is kept up to its first `STATS` — the last point where the
         rows are still documents and the time field is still in scope — with
-        the session time range spliced in as for `execute`. `BUCKET`'s
-        target-count form needs the span it divides, so a bound the session
-        leaves open is first read off the data with `MIN`/`MAX`. ES|QL emits
-        no bucket for an empty interval; those are filled in afterwards.
+        the session time range spliced in as for `execute`. The bucket width
+        is the span divided into `buckets` (see `_bucket_step`); a bound the
+        session leaves open is first read off the data with `MIN`/`MAX`.
+        ES|QL emits no bucket for an empty interval; those are filled in
+        afterwards, out to the span's edges.
         """
         esql = query.strip()
         commands = _split_commands(esql)
@@ -515,27 +546,29 @@ Describing an index returns field metadata from its mapping (name, type).
                 break
         field = self._time_field()
         ident = _esql_identifier(field)
-        bounds = self._time_bounds()
-        lo, hi = bounds.get("gte"), bounds.get("lte")
+        lo, hi = self._time_bounds_ms()
         if lo is None or hi is None:
             extent = await self._esql(
                 f"{esql} | STATS lo = MIN({ident}), hi = MAX({ident}) | LIMIT 1"
             )
             row = extent["values"][0] if extent["values"] else [None, None]
-            lo = lo or row[0]
-            hi = hi or row[1]
+            lo = lo if lo is not None else _epoch_ms_or_none(row[0])
+            hi = hi if hi is not None else _epoch_ms_or_none(row[1])
             if lo is None or hi is None:
                 return HistogramResult(field=field, interval="", buckets=[])
+        if hi < lo:
+            return HistogramResult(field=field, interval="", buckets=[])
+        step = _bucket_step(lo, hi, buckets)
         resp = await self._esql(
-            f"{esql} | STATS count = COUNT(*) BY time = BUCKET({ident}, {buckets},"
-            f' "{lo}", "{hi}") | SORT time | LIMIT {_ESQL_HISTOGRAM_LIMIT}'
+            f"{esql} | STATS count = COUNT(*) BY time = BUCKET({ident}, {step} milliseconds)"
+            f" | SORT time | LIMIT {_ESQL_HISTOGRAM_LIMIT}"
         )
         raw = [
             HistogramBucket(time=_epoch_ms(time), count=int(count))
             for count, time in resp["values"]
             if time is not None
         ]
-        return _fill_gaps(field, raw)
+        return _fill_span(field, raw, step, lo, hi)
 
     async def _esql(self, esql: str) -> dict[str, Any]:
         """Run one ES|QL statement, logged, returning the raw JSON response."""
@@ -586,6 +619,15 @@ Describing an index returns field metadata from its mapping (name, type).
             if value := self._session_values.get(key):
                 bounds[op] = _es_datetime(_resolve_time(str(value)))
         return bounds
+
+    def _time_bounds_ms(self) -> tuple[int | None, int | None]:
+        """The session time range as Unix milliseconds, `None` for an open end."""
+        return tuple(  # ty: ignore[invalid-return-type]
+            _ms(_resolve_time(str(value)))
+            if (value := self._session_values.get(key))
+            else None
+            for key in ("time_from", "time_to")
+        )
 
     def _time_filter(self) -> dict[str, Any] | None:
         """The session time range as a `range` query clause, or None if unset."""
@@ -854,6 +896,16 @@ def _split_commands(query: str) -> list[tuple[int, int]]:
     ]
 
 
+def _ms(when: datetime) -> int:
+    """Unix milliseconds of a datetime."""
+    return int(when.timestamp() * 1000)
+
+
+def _es_datetime_ms(ms: int) -> str:
+    """Format Unix milliseconds as the UTC datetime string ES reads."""
+    return _es_datetime(datetime.fromtimestamp(ms / 1000, UTC))
+
+
 def _epoch_ms(value: Any) -> int:
     """Unix milliseconds for a datetime ES|QL returned (ISO string or number)."""
     if isinstance(value, (int, float)):
@@ -864,34 +916,68 @@ def _epoch_ms(value: Any) -> int:
     return int(datetime.fromisoformat(text).timestamp() * 1000)
 
 
-def _fill_gaps(field: str, buckets: list[HistogramBucket]) -> HistogramResult:
-    """Make `buckets` contiguous, inserting empty ones where ES|QL emitted none.
+def _epoch_ms_or_none(value: Any) -> int | None:
+    """`_epoch_ms`, passing through the `None` an empty `MIN`/`MAX` yields."""
+    return None if value is None else _epoch_ms(value)
 
-    The interval is taken as the smallest gap between neighbours, and gaps
-    are filled only when every gap is a whole multiple of it — true of any
-    fixed interval. A calendar interval (months vary in length) does not
-    pass that test and is left as it came, with no interval reported.
+
+def _agg_ms(agg: dict[str, Any] | None) -> int | None:
+    """Unix milliseconds from a `min`/`max` aggregation on a date field, or
+    `None` when it saw no documents."""
+    value = (agg or {}).get("value")
+    return None if value is None else int(value)
+
+
+def _bucket_step(lo: int, hi: int, buckets: int) -> int:
+    """The bucket width, in milliseconds, dividing `lo`..`hi` into `buckets`.
+
+    Buckets are aligned to multiples of the width since the epoch — that is
+    how both `date_histogram` and `BUCKET` cut them — so a span rarely starts
+    on a boundary and can touch one bucket more than its length divides into.
+    Dividing by one less absorbs that: the span is never more than `buckets`
+    wide, and for any span much longer than `buckets` milliseconds it is at
+    least `buckets - 1`.
     """
-    if len(buckets) < 2:
-        return HistogramResult(field=field, interval="", buckets=buckets)
-    steps = [b.time - a.time for a, b in zip(buckets, buckets[1:])]
-    step = min(steps)
-    if step <= 0 or any(s % step for s in steps):
-        return HistogramResult(field=field, interval="", buckets=buckets)
-    filled: list[HistogramBucket] = [buckets[0]]
-    for bucket in buckets[1:]:
-        while filled[-1].time + step < bucket.time:
-            filled.append(HistogramBucket(time=filled[-1].time + step, count=0))
-        filled.append(bucket)
+    return (hi - lo) // max(buckets - 1, 1) + 1
+
+
+def _fill_span(
+    field: str, buckets: list[HistogramBucket], step: int, lo: int, hi: int
+) -> HistogramResult:
+    """Lay `buckets` out over every `step`-wide bucket from `lo` to `hi`.
+
+    ES|QL emits no bucket for an interval with no rows, so the result is
+    rebuilt from the span: one bucket per multiple of `step` the span touches,
+    each carrying the count ES|QL reported for it, or zero.
+    """
+    first = lo - lo % step
+    last = hi - hi % step
+    counts = {b.time: b.count for b in buckets}
+    filled = [
+        HistogramBucket(time=t, count=counts.get(t, 0))
+        for t in range(first, last + 1, step)
+    ]
     return HistogramResult(field=field, interval=_duration(step), buckets=filled)
 
 
 def _duration(ms: int) -> str:
-    """Format a millisecond span the way ES names intervals: `5m`, `1h`, `1d`."""
-    for unit, size in (("d", 86_400_000), ("h", 3_600_000), ("m", 60_000), ("s", 1000)):
-        if ms % size == 0:
-            return f"{ms // size}{unit}"
-    return f"{ms}ms"
+    """Name a bucket width the way ES spells intervals — `5m`, `1h`, `1d` — or,
+    for one that is no round unit, its two largest parts: `9m36s`. A
+    millisecond remainder is dropped once the width is a minute or more."""
+    parts = []
+    for unit, size in (
+        ("d", 86_400_000),
+        ("h", 3_600_000),
+        ("m", 60_000),
+        ("s", 1000),
+        ("ms", 1),
+    ):
+        n, ms = divmod(ms, size)
+        if n:
+            parts.append(f"{n}{unit}")
+    if len(parts) > 1 and parts[0][-1] != "s" and parts[-1].endswith("ms"):
+        parts.pop()  # a millisecond remainder on a minute-or-longer width is noise
+    return "".join(parts[:2]) or "0ms"
 
 
 def _esql_error(exc: elasticsearch.ApiError) -> DriverError:
