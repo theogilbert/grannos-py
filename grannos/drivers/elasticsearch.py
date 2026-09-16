@@ -17,6 +17,7 @@ from ..protocol import (
     FieldDescription,
     HistogramBucket,
     HistogramResult,
+    Language,
     NodeType,
     ParamType,
     ReadResult,
@@ -66,6 +67,9 @@ class ElasticsearchDriver(BaseDriver):
 
     LABEL = "Elasticsearch"
     SUPPORTS_HISTOGRAM = True
+    # The default query mode; Dev Tools and ES|QL buffers have no language
+    # of their own here.
+    LANGUAGES = [Language.LUCENE]
 
     FIND_PATHS = {
         NodeType.INDEX: [["*"]],
@@ -697,14 +701,9 @@ Describing an index returns field metadata from its mapping (name, type).
                     ExploreItem(name="aliases", type="group", expandable=True),
                 ]
             case [index, "mappings"]:
-                log_query(logger, f"indices.get_mapping {index}")
-                resp = await self._client.indices.get_mapping(index=index)
-                props = resp[index]["mappings"].get("properties", {})
                 return [
-                    ExploreItem(
-                        name=field, type=info.get("type", "object"), expandable=False
-                    )
-                    for field, info in props.items()
+                    ExploreItem(name=field, type=kind, expandable=False)
+                    for field, kind in (await self._fields(index)).items()
                 ]
             case [index, "aliases"]:
                 log_query(logger, f"indices.get_alias {index}")
@@ -720,19 +719,48 @@ Describing an index returns field metadata from its mapping (name, type).
     async def explore_describe(self, path: list[str]) -> EntityDescription | None:
         match path:
             case [index]:
-                log_query(logger, f"indices.get_mapping {index}")
-                resp = await self._client.indices.get_mapping(index=index)
-                props = resp[index]["mappings"].get("properties", {})
                 return EntityDescription(
                     name=index,
                     kind="document",
                     properties=[
-                        FieldDescription(name=field, types=[info.get("type", "object")])
-                        for field, info in props.items()
+                        FieldDescription(name=field, types=[kind])
+                        for field, kind in (await self._fields(index)).items()
                     ],
                 )
             case _:
                 return None
+
+    async def _fields(self, index: str) -> dict[str, str]:
+        """The queryable fields of `index`, as dotted paths to their types.
+
+        `index` may be a pattern or alias — a Lucene query names its indices
+        that way — in which case the mappings of everything it matches are
+        merged, in index order, the last word on a path's type winning.
+        Every mapping is flattened as a query addresses it: `user.name` for a
+        nested property, `message.keyword` for a multi-field.
+        """
+        log_query(logger, f"indices.get_mapping {index}")
+        resp = await self._client.indices.get_mapping(index=index)
+        fields: dict[str, str] = {}
+        for name in sorted(resp):
+            _flatten_fields(resp[name]["mappings"].get("properties", {}), "", fields)
+        return fields
+
+
+def _flatten_fields(props: dict[str, Any], prefix: str, into: dict[str, str]) -> None:
+    """Flatten a mapping's `properties` into `into`, as dotted paths to types.
+
+    A property with sub-`properties` and no type of its own is an `object`
+    holder and listed as such; a multi-field's `fields` are listed under the
+    parent's path like sub-properties are.
+    """
+    for name, info in props.items():
+        path = f"{prefix}{name}"
+        into[path] = info.get("type", "object")
+        if children := info.get("properties"):
+            _flatten_fields(children, f"{path}.", into)
+        if multi := info.get("fields"):
+            _flatten_fields(multi, f"{path}.", into)
 
 
 def _resolve_time(value: str) -> datetime:

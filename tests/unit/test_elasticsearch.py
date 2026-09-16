@@ -16,7 +16,7 @@ from grannos.drivers.elasticsearch import (
     _resolve_time,
     _split_commands,
 )
-from grannos.protocol import HistogramBucket, HistogramResult, ReadResult
+from grannos.protocol import HistogramBucket, HistogramResult, Language, ReadResult
 
 
 async def _hosts(params: dict) -> list[str]:
@@ -231,6 +231,86 @@ class TestSessionSettings:
         driver, _ = _lucene_driver()
         with pytest.raises(DriverError, match="Unknown session setting: nope"):
             await driver.set_session({"nope": "1"})
+
+
+def _mapping_driver(mappings: dict[str, dict]) -> ElasticsearchDriver:
+    """A driver whose `get_mapping` answers with `mappings`, keyed by index."""
+    client = MagicMock()
+    client.indices.get_mapping = AsyncMock(
+        return_value={
+            name: {"mappings": {"properties": props}}
+            for name, props in mappings.items()
+        }
+    )
+    return ElasticsearchDriver({}, client, DriverSettings())
+
+
+class TestMappings:
+    def test_declares_lucene(self) -> None:
+        assert ElasticsearchDriver.LANGUAGES == [Language.LUCENE]
+
+    async def test_lists_top_level_fields_with_types(self) -> None:
+        driver = _mapping_driver(
+            {"orders": {"status": {"type": "keyword"}, "total": {"type": "float"}}}
+        )
+        items = await driver.explore_list(["orders", "mappings"])
+        assert [(i.name, i.type) for i in items] == [
+            ("status", "keyword"),
+            ("total", "float"),
+        ]
+
+    async def test_flattens_nested_properties_and_multi_fields(self) -> None:
+        driver = _mapping_driver(
+            {
+                "logs": {
+                    "message": {
+                        "type": "text",
+                        "fields": {"keyword": {"type": "keyword"}},
+                    },
+                    "user": {
+                        "properties": {
+                            "name": {"type": "keyword"},
+                            "geo": {"properties": {"city": {"type": "keyword"}}},
+                        }
+                    },
+                }
+            }
+        )
+        items = await driver.explore_list(["logs", "mappings"])
+        assert [(i.name, i.type) for i in items] == [
+            ("message", "text"),
+            ("message.keyword", "keyword"),
+            ("user", "object"),
+            ("user.name", "keyword"),
+            ("user.geo", "object"),
+            ("user.geo.city", "keyword"),
+        ]
+
+    async def test_pattern_merges_every_matched_index(self) -> None:
+        driver = _mapping_driver(
+            {
+                "logs-2024.02": {"level": {"type": "keyword"}, "host": {"type": "ip"}},
+                "logs-2024.01": {"level": {"type": "text"}, "msg": {"type": "text"}},
+            }
+        )
+        items = await driver.explore_list(["logs-*", "mappings"])
+        driver._client.indices.get_mapping.assert_awaited_once_with(index="logs-*")
+        assert {i.name: i.type for i in items} == {
+            "host": "ip",
+            "level": "keyword",
+            "msg": "text",
+        }
+
+    async def test_describe_lists_the_same_fields(self) -> None:
+        driver = _mapping_driver(
+            {"logs": {"user": {"properties": {"name": {"type": "keyword"}}}}}
+        )
+        desc = await driver.explore_describe(["logs"])
+        assert desc is not None
+        assert [(p.name, p.types) for p in desc.properties] == [
+            ("user", ["object"]),
+            ("user.name", ["keyword"]),
+        ]
 
 
 class TestLuceneSessionSettings:

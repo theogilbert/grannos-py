@@ -619,6 +619,8 @@ class Language(StrEnum):
     SQL = "sql"
     CYPHER = "cypher"
     PROMQL = "promql"
+    LUCENE = "lucene"
+    """Grannos' Elasticsearch Lucene mode: ``<index> | <query_string>``."""
 
 
 class ParamType(StrEnum):

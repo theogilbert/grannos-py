@@ -337,10 +337,18 @@ query carrying its own `SORT` keeps it, and one that reads no index (`ROW`,
     └── aliases   → alias names
 ```
 
-System indices (names starting with `.`) are hidden.
+System indices (names starting with `.`) are hidden. Mappings are listed
+flat, as a Lucene query addresses them: `user.name` for a nested property,
+`message.keyword` for a multi-field, the holder itself listed as `object`.
+The `<index>` segment may be a pattern or alias as well as a name — a client
+completing `logs-* | …` lists `["logs-*", "mappings"]` — in which case the
+mappings of every index matched are merged.
 
-`explore.describe` is supported on `[index]` paths and returns field metadata
-from the index mapping (name, type).
+`explore.describe` is supported on `[index]` paths and returns the same field
+metadata (name, type).
+
+The driver declares the `lucene` language: the `<index> | <query_string>`
+form of its default query mode.
 
 ---
 
