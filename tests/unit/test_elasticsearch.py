@@ -17,7 +17,13 @@ from grannos.drivers.elasticsearch import (
     _resolve_time,
     _split_commands,
 )
-from grannos.protocol import HistogramBucket, HistogramResult, Language, ReadResult
+from grannos.protocol import (
+    HistogramBucket,
+    HistogramResult,
+    Language,
+    MessageLevel,
+    ReadResult,
+)
 
 
 async def _hosts(params: dict) -> list[str]:
@@ -437,6 +443,88 @@ class TestEsqlSessionSettings:
         client.esql.query.assert_awaited_once_with(
             query="FROM orders | SORT total DESC", format="json"
         )
+
+
+def _hits(*docs: dict) -> dict:
+    return {
+        "hits": {
+            "total": {"value": len(docs)},
+            "hits": [{"_id": str(i), "_source": doc} for i, doc in enumerate(docs)],
+        }
+    }
+
+
+class TestMissingTimeFieldWarning:
+    async def test_lucene_documents_without_the_field_are_flagged(self) -> None:
+        driver, client = _lucene_driver()
+        client.search.return_value = _hits({"created": "2024-01-01", "n": 1})
+        result = await driver.execute("orders | *", [])
+        assert isinstance(result, ReadResult)
+        assert [m.level for m in result.messages] == [MessageLevel.WARNING]
+        assert '"@timestamp" is not in this result' in result.messages[0].text
+        assert result.columns == ["_id", "created", "n"]  # the result is intact
+
+    async def test_names_the_configured_field(self) -> None:
+        driver, client = _lucene_driver()
+        await driver.set_session({"time_field": "created_at"})
+        client.search.return_value = _hits({"@timestamp": "2024-01-01"})
+        result = await driver.execute("orders | *", [])
+        assert isinstance(result, ReadResult)
+        assert '"created_at"' in result.messages[0].text
+
+    async def test_field_present_is_silent(self) -> None:
+        driver, client = _lucene_driver()
+        client.search.return_value = _hits({"@timestamp": "2024-01-01", "n": 1})
+        result = await driver.execute("orders | *", [])
+        assert isinstance(result, ReadResult)
+        assert result.messages == []
+
+    async def test_nested_field_is_found_flattened(self) -> None:
+        driver, client = _lucene_driver()
+        await driver.set_session({"time_field": "event.created"})
+        client.search.return_value = _hits({"event": {"created": "2024-01-01"}})
+        result = await driver.execute("orders | *", [])
+        assert isinstance(result, ReadResult)
+        assert result.messages == []
+
+    async def test_empty_result_is_silent(self) -> None:
+        driver, _ = _lucene_driver()
+        result = await driver.execute("orders | *", [])
+        assert isinstance(result, ReadResult)
+        assert result.messages == []
+
+    async def test_esql_rows_without_the_field_are_flagged(self) -> None:
+        client = MagicMock()
+        client.esql.query = AsyncMock(
+            return_value={"columns": [{"name": "status"}], "values": [["open"]]}
+        )
+        driver = ElasticsearchDriver({"query_mode": "esql"}, client, DriverSettings())
+        result = await driver.execute("FROM orders | KEEP status", [])
+        assert isinstance(result, ReadResult)
+        assert [m.level for m in result.messages] == [MessageLevel.WARNING]
+
+    async def test_esql_aggregates_are_silent(self) -> None:
+        client = MagicMock()
+        client.esql.query = AsyncMock(
+            return_value={"columns": [{"name": "n"}], "values": [[3]]}
+        )
+        driver = ElasticsearchDriver({"query_mode": "esql"}, client, DriverSettings())
+        result = await driver.execute("FROM orders | STATS n = COUNT(*)", [])
+        assert isinstance(result, ReadResult)
+        assert result.messages == []
+
+    async def test_dev_tools_is_silent(self) -> None:
+        driver = _driver_with_response(
+            {
+                "hits": {
+                    "total": {"value": 1},
+                    "hits": [{"_id": "1", "_source": {"n": 1}}],
+                }
+            }
+        )
+        result = await driver.execute("GET /orders/_search", [])
+        assert isinstance(result, ReadResult)
+        assert result.messages == []
 
 
 class TestSplitCommands:

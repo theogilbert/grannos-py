@@ -13,11 +13,13 @@ from ..protocol import (
     DriverParam,
     DriverParamChoice,
     EntityDescription,
+    ExecuteMessage,
     ExploreItem,
     FieldDescription,
     HistogramBucket,
     HistogramResult,
     Language,
+    MessageLevel,
     NodeType,
     ParamType,
     ReadResult,
@@ -343,13 +345,40 @@ Describing an index returns field metadata from its mapping (name, type).
     async def _execute(self, query: str) -> ReadResult:
         mode = self.params.get("query_mode", "lucene")
         if mode == "lucene":
-            return await self._execute_lucene(query)
+            return self._warn_missing_time_field(await self._execute_lucene(query))
         elif mode == "dev_tools":
             return await self._execute_dev_tools(query)
         elif mode == "esql":
-            return await self._execute_esql(query)
+            result = await self._execute_esql(query)
+            # Past a STATS the rows are aggregates, not documents: the time
+            # field is gone by design, not by misconfiguration.
+            if _esql_has_stats(query):
+                return result
+            return self._warn_missing_time_field(result)
         else:
             raise DriverError(f"Unknown query_mode: {mode!r}")
+
+    def _warn_missing_time_field(self, result: ReadResult) -> ReadResult:
+        """Flag a result whose documents lack the session's time field.
+
+        The time range and histogram both go by that field, so a name that
+        matches nothing silently disables them — a mistyped `time_field`, or
+        an index that dates its documents differently. An empty result says
+        nothing about the field either way and is left alone.
+        """
+        field = self._time_field()
+        if result.rows and field not in result.columns:
+            result.messages.append(
+                ExecuteMessage(
+                    level=MessageLevel.WARNING,
+                    text=(
+                        f'The session time field "{field}" is not in this result. '
+                        "The time range and histogram apply to it — check "
+                        "time_field in the session settings."
+                    ),
+                )
+            )
+        return result
 
     async def _execute_lucene(self, query: str) -> ReadResult:
         kwargs, applied = self._lucene_search(query)
@@ -904,6 +933,13 @@ def _ms(when: datetime) -> int:
 def _es_datetime_ms(ms: int) -> str:
     """Format Unix milliseconds as the UTC datetime string ES reads."""
     return _es_datetime(datetime.fromtimestamp(ms / 1000, UTC))
+
+
+def _esql_has_stats(query: str) -> bool:
+    """Whether an ES|QL query aggregates — has a top-level `STATS` command."""
+    return any(
+        _ESQL_STATS_RE.match(query[start:end]) for start, end in _split_commands(query)
+    )
 
 
 def _epoch_ms(value: Any) -> int:

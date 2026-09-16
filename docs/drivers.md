@@ -306,6 +306,11 @@ query is kept up to its first `STATS` and
 empty buckets, which ES|QL omits, are filled in out to the range's edges.
 Dev Tools requests are sent as written and cannot be charted.
 
+A Lucene or ES|QL result whose documents lack `time_field` carries a
+warning-level message naming the field, since a name that matches nothing
+silently disables the time range and the histogram. An empty result, a Dev
+Tools request, or an ES|QL query that aggregates (`STATS`) is not checked.
+
 **Time range and sorting:** five session settings — changeable any time via
 `session.set`, no reconnect needed — apply to every Lucene and ES|QL query.
 Dev Tools queries are sent exactly as written.
