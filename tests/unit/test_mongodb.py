@@ -15,6 +15,7 @@ from grannos.drivers.mongodb import (
     _is_gridfs_internal,
     _make_mongo_client,
     _serialize,
+    _strip_comments,
 )
 from grannos.protocol import (
     DownloadResult,
@@ -181,6 +182,37 @@ class TestSerialize:
     def test_renders_binary_nested_in_dict(self) -> None:
         result = _serialize(_null_register_lob, {"blob": b"\x00\x01"})
         assert result == {"blob": LobPlaceholder(text="BSON Binary (2 bytes)")}
+
+
+class TestStripComments:
+    def test_removes_line_and_block_comments(self) -> None:
+        query = (
+            "// open orders\n"
+            '{"find": "orders", // the collection\n'
+            ' "db": "mydb", /* the database */ "filter": {}}\n'
+            "/* done */"
+        )
+        assert json.loads(_strip_comments(query)) == {
+            "find": "orders",
+            "db": "mydb",
+            "filter": {},
+        }
+
+    def test_leaves_markers_inside_strings_alone(self) -> None:
+        query = '{"find": "a//b", "db": "x", "filter": {"url": "http://h/*p*/"}}'
+        assert _strip_comments(query) == query
+
+    def test_leaves_an_escaped_quote_inside_a_string(self) -> None:
+        query = '{"find": "a\\"//b", "db": "x"} // c'
+        assert _strip_comments(query) == '{"find": "a\\"//b", "db": "x"} '
+
+    async def test_execute_accepts_a_commented_command(self) -> None:
+        client, _, col = _open_client()
+        driver = _make_driver(client)
+        await driver.execute(
+            '// drop it\n{"dropCollection": "old", /* gone */ "db": "mydb"}', []
+        )
+        client["mydb"].drop_collection.assert_awaited_once_with("old")
 
 
 class TestExecuteMalformedCommand:

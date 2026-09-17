@@ -23,6 +23,7 @@ from ..protocol import (
     GenericRecordDescription,
     IndexDescription,
     IndexKeyField,
+    Language,
     LobPlaceholder,
     NodeType,
     ParamType,
@@ -71,6 +72,7 @@ class MongoDriver(BaseDriver):
     """
 
     LABEL = "MongoDB"
+    LANGUAGES = [Language.MONGO]
 
     FIND_PATHS = {
         NodeType.DATABASE: [["*"]],
@@ -102,8 +104,10 @@ class MongoDriver(BaseDriver):
     HELP: str = """\
 ## MongoDB
 
-**Queries:** MongoDB Extended JSON command objects. `"db"` is required and
-names the target database. The top-level operation key names the collection.
+**Queries:** MongoDB Extended JSON command objects, one per statement — a
+file may hold any number, and `//` and `/* */` comments between or inside
+them are ignored. `"db"` is required and names the target database. The
+top-level operation key names the collection.
 
 ```json
 {"find": "users", "db": "auth"}
@@ -250,7 +254,7 @@ to fetch its full content later without re-running the query.
         # fans out to are logged separately at their own call sites.
         log_query(logger, query)
         try:
-            cmd: dict[str, Any] = json_util.loads(query)
+            cmd: dict[str, Any] = json_util.loads(_strip_comments(query))
             if "db" not in cmd:
                 raise DriverError(
                     'MongoDB command must include a "db" key specifying the target database'
@@ -609,6 +613,36 @@ to fetch its full content later without re-running the query.
     async def _list_indexes(self, db_name: str, collection_name: str) -> list[str]:
         log_query(logger, f"index_information {db_name}.{collection_name}")
         return sorted(await self._client[db_name][collection_name].index_information())
+
+
+def _strip_comments(query: str) -> str:
+    """Return ``query`` with ``//`` line and ``/* */`` block comments removed.
+
+    Extended JSON has no comment syntax, but a query file does (the ``mongo``
+    editor grammar treats both as whitespace), and a comment sent along with
+    the command must not make it invalid JSON. Comment markers inside a
+    string are left alone; a ``//`` in a URL value is not a comment.
+    """
+    out: list[str] = []
+    i, n = 0, len(query)
+    while i < n:
+        ch = query[i]
+        if ch == '"':
+            end = i + 1
+            while end < n and query[end] != '"':
+                end += 2 if query[end] == "\\" else 1
+            out.append(query[i : end + 1])
+            i = end + 1
+        elif query.startswith("//", i):
+            eol = query.find("\n", i)
+            i = n if eol < 0 else eol
+        elif query.startswith("/*", i):
+            close = query.find("*/", i + 2)
+            i = n if close < 0 else close + 2
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
 
 
 def _gridfs_file_row(db_name: str, bucket: str, doc: dict[str, Any]) -> dict[str, Any]:

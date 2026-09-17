@@ -621,6 +621,8 @@ class Language(StrEnum):
     PROMQL = "promql"
     LUCENE = "lucene"
     """Grannos' Elasticsearch Lucene mode: ``<index> | <query_string>``."""
+    MONGO = "mongo"
+    """MongoDB Extended JSON command objects, one per statement."""
 
 
 class ParamType(StrEnum):

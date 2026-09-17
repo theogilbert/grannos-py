@@ -451,8 +451,13 @@ explore tree goes no deeper than a job; describing it is the detailed view.
 | `username` | no | Username (can also be embedded in the URI) |
 | `password` | no | Password (masked; can also be embedded in the URI) |
 
-**Queries:** MongoDB Extended JSON command objects. `"db"` is required and
-names the target database. The top-level operation key names the collection.
+**Queries:** MongoDB Extended JSON command objects, one per statement — a
+file may hold any number, and `//` and `/* */` comments between or inside
+them are stripped before decoding. `"db"` is required and names the target
+database. The top-level operation key names the collection.
+
+The driver declares the `mongo` language (grannos.nvim's `mongo` filetype,
+`.mongo` files).
 
 **Read:**
 
