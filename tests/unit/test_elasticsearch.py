@@ -229,6 +229,32 @@ class TestSessionSettings:
         with pytest.raises(DriverError, match="Invalid time value"):
             await driver.set_session({"time_from": "yesterday"})
 
+    async def test_time_to_before_time_from_raises(self) -> None:
+        driver, _ = _lucene_driver()
+        with pytest.raises(
+            DriverError, match="time_to '-2h' is before time_from '-1h'"
+        ):
+            await driver.set_session({"time_from": "-1h", "time_to": "-2h"})
+        with pytest.raises(DriverError, match="is before time_from"):
+            await driver.set_session(
+                {"time_from": "2024-01-02T00:00:00Z", "time_to": "2024-01-01T00:00:00Z"}
+            )
+        assert driver.get_session()["time_from"] is None
+
+    async def test_time_to_before_stored_time_from_raises(self) -> None:
+        driver, _ = _lucene_driver()
+        await driver.set_session({"time_from": "-1h"})
+        with pytest.raises(DriverError, match="is before time_from"):
+            await driver.set_session({"time_to": "-2h"})
+        assert driver.get_session()["time_to"] is None
+
+    async def test_time_range_in_order_is_accepted(self) -> None:
+        driver, _ = _lucene_driver()
+        await driver.set_session({"time_from": "-2h", "time_to": "now"})
+        assert driver.get_session()["time_to"] == "now"
+        await driver.set_session({"time_from": "", "time_to": "-3h"})
+        assert driver.get_session()["time_to"] == "-3h"
+
     async def test_invalid_sort_order_raises(self) -> None:
         driver, _ = _lucene_driver()
         with pytest.raises(DriverError, match="Unknown sort_order"):
@@ -701,8 +727,11 @@ class TestHistogramLucene:
         client.search.assert_awaited_once()
 
     async def test_inverted_range_yields_no_buckets(self) -> None:
+        # set_session refuses an inverted range, but a relative `time_from`
+        # can still overtake an absolute `time_to` as time passes, so the
+        # histogram guards against it independently.
         driver, client = _hist_driver("lucene")
-        await driver.set_session({"time_from": _HOUR_TO, "time_to": _HOUR_FROM})
+        driver._session_values.update({"time_from": _HOUR_TO, "time_to": _HOUR_FROM})
         result = await driver.histogram("logs | *", 40)
         assert result.buckets == []
         client.search.assert_not_awaited()

@@ -261,7 +261,8 @@ Dev Tools queries are sent exactly as written.
 `time_from` / `time_to` accept `now`, an offset from now (`-1h`, `now-30m`,
 `+15s`), an ISO-8601 timestamp (`2024-01-01T00:00:00Z`), or a Unix timestamp in
 seconds. Either bound may stand alone; leave both empty for no time filter.
-Setting any of the five to an empty string restores its default.
+`time_to` must not be before `time_from`. Setting any of the five to an empty
+string restores its default.
 
 In Lucene mode the range becomes a `range` filter beside the query and the sort
 a `sort` clause. In ES|QL mode the range is spliced in as a `WHERE` directly
@@ -705,6 +706,15 @@ Describing an index returns field metadata from its mapping (name, type).
                         f"Unknown sort_order: {value!r} (expected 'asc' or 'desc')"
                     )
             updated[key] = text
+        # The two bounds are checked together after both have been resolved,
+        # so an inverted range is refused here (where the form shows it
+        # inline) rather than yielding an empty result at query time.
+        time_from, time_to = updated.get("time_from"), updated.get("time_to")
+        if time_from and time_to:
+            if _resolve_time(str(time_to)) < _resolve_time(str(time_from)):
+                raise DriverError(
+                    f"time_to {time_to!r} is before time_from {time_from!r}"
+                )
         self._session_values = updated
 
     def get_session(self) -> dict[str, Any]:
