@@ -53,27 +53,37 @@ class CopyFromCommand:
     """Trailing ``[WITH] (...)`` clause, verbatim, or empty."""
 
 
-def parse_copy_to(query: str) -> CopyToCommand | None:
-    """Parse a ``\\copy ... TO 'path'`` command, or return None if *query* isn't one."""
-    match = _COPY_TO_RE.match(query)
+def parse_copy_to(query: str, code: str | None = None) -> CopyToCommand | None:
+    """Parse a ``\\copy ... TO 'path'`` command, or return None if *query* isn't one.
+
+    *code* is *query* with its comments blanked out, to match against so a
+    comment cannot hide or fake the command; the parts are then read from
+    *query* itself, keeping the comments that go on to Postgres.
+    """
+    match = _COPY_TO_RE.match(query if code is None else code)
     if match is None:
         return None
     return CopyToCommand(
-        source=match.group("source").strip(),
+        source=query[slice(*match.span("source"))].strip(),
         path=match.group("path").replace("''", "'"),
-        options=match.group("options").strip(),
+        options=query[slice(*match.span("options"))].strip(),
     )
 
 
-def parse_copy_from(query: str) -> CopyFromCommand | None:
-    """Parse a ``\\copy ... FROM 'path'`` command, or return None if *query* isn't one."""
-    match = _COPY_FROM_RE.match(query)
+def parse_copy_from(query: str, code: str | None = None) -> CopyFromCommand | None:
+    """Parse a ``\\copy ... FROM 'path'`` command, or return None if *query* isn't one.
+
+    *code* is *query* with its comments blanked out, to match against so a
+    comment cannot hide or fake the command; the parts are then read from
+    *query* itself, keeping the comments that go on to Postgres.
+    """
+    match = _COPY_FROM_RE.match(query if code is None else code)
     if match is None:
         return None
     return CopyFromCommand(
-        target=match.group("target").strip(),
+        target=query[slice(*match.span("target"))].strip(),
         path=match.group("path").replace("''", "'"),
-        options=match.group("options").strip(),
+        options=query[slice(*match.span("options"))].strip(),
     )
 
 

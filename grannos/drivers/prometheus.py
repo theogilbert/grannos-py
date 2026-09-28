@@ -258,10 +258,6 @@ job name; instance/job already group the record).
             diagram_captions: Unused for Prometheus (not a graph driver).
         """
         mode = self._session_values.get("query_mode", "instant")
-        # PromQL has `#` comments of its own, but the range header is parsed
-        # here: a comment ahead of it, or holding a ` | `, would be read as part
-        # of it.
-        query = blank_comments(query, line=("#",), quotes="\"'`")
         if mode == "instant":
             return await self._execute_instant(query)
         if mode == "range":
@@ -552,12 +548,17 @@ job name; instance/job already group the record).
 
 
 def _parse_range_query(query: str) -> tuple[str, str, str, str]:
-    if " | " not in query:
+    # PromQL reads its own `#` comments, so the expression keeps them; the
+    # separator and header are found in a blanked copy (same offsets), where a
+    # comment ahead of the header, or holding a ` | `, cannot be mistaken for it.
+    code = blank_comments(query, line=("#",), quotes="\"'`")
+    if " | " not in code:
         raise DriverError(
             "Range query must be in the format: <start>,<end>,<step> | <promql>\n"
             "Example: -1h,now,15s | rate(http_requests_total[5m])"
         )
-    header, _, promql = query.partition(" | ")
+    at = code.index(" | ")
+    header, promql = code[:at], query[at + 3 :]
     parts = [p.strip() for p in header.split(",")]
     if len(parts) != 3:
         raise DriverError(

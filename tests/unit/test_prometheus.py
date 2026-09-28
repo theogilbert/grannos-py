@@ -289,7 +289,7 @@ class TestExecute:
         await driver.execute("# a | b\n-1h,now,15s | up # all", [])
         params = session.get.call_args.kwargs["params"]
         assert params["start"] != "" and params["step"] == "15s"
-        assert params["query"].strip() == "up"
+        assert params["query"] == "up # all"
 
     async def test_unknown_query_mode_rejected_by_set_session(self) -> None:
         driver, _ = _driver_with_response({})

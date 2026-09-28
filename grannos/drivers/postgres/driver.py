@@ -234,11 +234,11 @@ after an idle timeout).
         code = blank_comments(
             query, line=("--",), block=True, quotes="'\"", escape=None
         )
-        copy_cmd = parse_copy_to(code)
+        copy_cmd = parse_copy_to(query, code)
         if copy_cmd is not None:
             return await self._execute_copy_to(copy_cmd)
 
-        copy_from_cmd = parse_copy_from(code)
+        copy_from_cmd = parse_copy_from(query, code)
         if copy_from_cmd is not None:
             return await self._execute_copy_from(copy_from_cmd)
 

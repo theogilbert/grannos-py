@@ -426,14 +426,16 @@ class TestLuceneSessionSettings:
 
 
 class TestEsqlSessionSettings:
-    async def test_line_comment_does_not_swallow_spliced_settings(self) -> None:
+    async def test_comments_kept_and_do_not_swallow_spliced_settings(self) -> None:
         client = MagicMock()
         client.esql.query = AsyncMock(return_value={"columns": [], "values": []})
         driver = ElasticsearchDriver({"query_mode": "esql"}, client, DriverSettings())
         await driver.set_session({"sort_field": "total"})
         await driver.execute("FROM orders // all | of them\n| LIMIT 10 // ten", [])
         sent = client.esql.query.call_args.kwargs["query"]
-        assert " ".join(sent.split()) == "FROM orders | SORT total DESC | LIMIT 10"
+        assert (
+            sent == "FROM orders | SORT total DESC // all | of them\n| LIMIT 10 // ten"
+        )
 
     async def test_time_range_follows_source_command(self) -> None:
         driver = _esql_driver()
@@ -778,6 +780,24 @@ class TestHistogramLucene:
 
 
 class TestHistogramEsql:
+    async def test_comment_ahead_of_stats_does_not_swallow_the_bucketing(
+        self,
+    ) -> None:
+        driver, client = _hist_driver("esql")
+        await driver.set_session({"time_from": _HOUR_FROM, "time_to": _HOUR_TO})
+        client.esql.query.return_value = {"columns": [], "values": []}
+        await driver.histogram(
+            "// errors\nFROM logs /* all */ | WHERE x > 1 // big\n| STATS n = COUNT(*)",
+            4,
+        )
+        sent = client.esql.query.call_args.kwargs["query"]
+        assert sent.startswith("// errors\nFROM logs | WHERE @timestamp >= ")
+        assert sent.endswith(
+            " /* all */ | WHERE x > 1"
+            " | STATS count = COUNT(*) BY time = BUCKET(@timestamp, 1200000 milliseconds)"
+            " | SORT time | LIMIT 1000"
+        )
+
     async def test_buckets_between_session_bounds(self) -> None:
         driver, client = _hist_driver("esql")
         await driver.set_session({"time_from": _HOUR_FROM, "time_to": _HOUR_TO})

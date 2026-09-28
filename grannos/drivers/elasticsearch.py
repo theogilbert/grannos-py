@@ -351,11 +351,11 @@ Describing an index returns field metadata from its mapping (name, type).
 
     async def _execute(self, query: str) -> ReadResult:
         mode = self.params.get("query_mode", "lucene")
-        query = _blank_comments(query, mode)
         if mode == "lucene":
+            query = _blank_lucene_comments(query)
             return self._warn_missing_time_field(await self._execute_lucene(query))
         elif mode == "dev_tools":
-            return await self._execute_dev_tools(query)
+            return await self._execute_dev_tools(_blank_dev_tools_comments(query))
         elif mode == "esql":
             result = await self._execute_esql(query)
             # Past a STATS the rows are aggregates, not documents: the time
@@ -486,10 +486,11 @@ Describing an index returns field metadata from its mapping (name, type).
             )
         if mode not in ("lucene", "esql"):
             raise DriverError(f"Unknown query_mode: {mode!r}")
-        query = _blank_comments(query, mode)
         try:
             if mode == "lucene":
-                return await self._histogram_lucene(query, buckets)
+                return await self._histogram_lucene(
+                    _blank_lucene_comments(query), buckets
+                )
             return await self._histogram_esql(query, buckets)
         except elasticsearch.ConnectionError as exc:
             if self._ever_connected:
@@ -578,10 +579,14 @@ Describing an index returns field metadata from its mapping (name, type).
             at = commands[0][1]
             esql = f"{esql[:at]} | WHERE {clause}{esql[at:]}"
             commands = _split_commands(esql)
-        for start, end in commands:
+        # Cut at the end of the last command kept, ahead of any comment
+        # trailing it, so the aggregation appended below is not commented out.
+        kept = commands
+        for i, (start, end) in enumerate(commands):
             if _ESQL_STATS_RE.match(esql[start:end]):
-                esql = esql[:start].rstrip().rstrip("|").rstrip()
+                kept = commands[:i]
                 break
+        esql = esql[: kept[-1][1]]
         field = self._time_field()
         ident = _esql_identifier(field)
         lo, hi = self._time_bounds_ms()
@@ -897,32 +902,35 @@ def _esql_identifier(name: str) -> str:
     return "`" + name.replace("`", "``") + "`"
 
 
-def _blank_comments(query: str, mode: str) -> str:
-    """Blank out the comments of a query in the given query mode.
+def _blank_lucene_comments(query: str) -> str:
+    """Blank out the `--` comments of a Lucene query.
 
     Lucene has no comment syntax: `--` is the query file's own (a `-` cannot
     start the term it prohibits, so `--` never starts a valid token), and must
-    not reach Elasticsearch. Dev Tools takes Kibana Console's `#` and `//` line
-    and `/* */` block comments, which the JSON body parser would reject.
-    ES|QL has `//` and `/* */` natively, but the session settings are spliced
-    in after the source command and at the end of the query, where a line
-    comment would swallow them.
+    not reach Elasticsearch.
     """
-    if mode == "lucene":
-        return blank_comments(query, line=("--",), quotes='"/', after="!():^<>=[]{}~|")
-    if mode == "dev_tools":
-        return blank_comments(query, line=("#", "//"), block=True, after=",{}[]")
-    return blank_comments(query, line=("//",), block=True, quotes='"`')
+    return blank_comments(query, line=("--",), quotes='"/', after="!():^<>=[]{}~|")
+
+
+def _blank_dev_tools_comments(query: str) -> str:
+    """Blank out Kibana Console's `#` and `//` line and `/* */` block comments.
+
+    They are Console's, not Elasticsearch's: the request line is parsed here,
+    and the body by a JSON parser that has no comments.
+    """
+    return blank_comments(query, line=("#", "//"), block=True, after=",{}[]")
 
 
 def _split_commands(query: str) -> list[tuple[int, int]]:
     """Spans of the top-level `|`-separated commands of an ES|QL query.
 
-    Each span excludes surrounding whitespace, so a command's end offset is
-    exactly where a ` | NEW COMMAND` can be spliced in. Pipes inside string
-    literals (including triple-quoted blocks) and backquoted identifiers do
-    not split.
+    Each span excludes surrounding whitespace and comments, so a command's end
+    offset is exactly where a ` | NEW COMMAND` can be spliced in — ahead of a
+    `//` comment that would otherwise swallow it. Pipes inside string literals
+    (including triple-quoted blocks), backquoted identifiers and comments do
+    not split. The comments stay in the query: ES|QL reads them itself.
     """
+    query = blank_comments(query, line=("//",), block=True, quotes='"`')
     spans: list[tuple[int, int]] = []
     start = 0
     i = 0

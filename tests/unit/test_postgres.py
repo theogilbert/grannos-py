@@ -357,6 +357,14 @@ class TestRootListing:
 
 
 class TestParseCopyTo:
+    def test_keeps_comments_of_the_source_query(self) -> None:
+        query = "-- export\n\\copy (SELECT /* all */ 1) TO '/tmp/o.csv' -- done"
+        code = "         \n\\copy (SELECT           1) TO '/tmp/o.csv'        "
+        cmd = parse_copy_to(query, code)
+        assert cmd is not None
+        assert cmd.source == "(SELECT /* all */ 1)"
+        assert cmd.path == "/tmp/o.csv"
+
     def test_returns_none_for_non_copy_query(self) -> None:
         assert parse_copy_to("SELECT 1") is None
 
