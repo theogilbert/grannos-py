@@ -93,6 +93,8 @@ Column names and types are auto-detected. Pass
 `columns = {'id': 'INTEGER', 'name': 'VARCHAR'}` to `read_csv` to declare
 them yourself, or `delim`/`quote`/`skip` to override the dialect it sniffs.
 
+**Comments:** `--` to the end of the line, and `/* ... */`.
+
 **Resources:**
 
 ```

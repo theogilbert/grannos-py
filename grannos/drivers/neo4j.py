@@ -26,6 +26,7 @@ from ..protocol import (
     WriteResult,
 )
 from ..tabular import flatten_docs
+from .comments import blank_comments
 from .base import (
     SAMPLE_SCAN_ROWS,
     BaseDriver,
@@ -110,6 +111,8 @@ MATCH (u:User {name: "Alice"})-[:BOUGHT]->(p:Product) RETURN u, p
 
 Results are serialized and flattened: nodes expand to `col._labels`, `col.prop`,
 …; relationships expand to `col._type`, `col.prop`, …
+
+**Comments:** `//` to the end of the line, and `/* ... */`.
 
 **Resources:**
 
@@ -625,17 +628,11 @@ def _serialize(
 
 def _plan_keyword(query: str) -> str | None:
     """Returns 'explain' or 'profile' if the query's first real keyword is EXPLAIN/PROFILE."""
-    for line in query.splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("//"):
-            continue
-        upper = stripped.upper()
-        if upper.startswith("EXPLAIN"):
-            return "explain"
-        if upper.startswith("PROFILE"):
-            return "profile"
-        return None
-    return None
+    words = blank_comments(query, line=("//",), block=True, quotes="'\"`").split(
+        None, 1
+    )
+    keyword = words[0].lower() if words else ""
+    return keyword if keyword in ("explain", "profile") else None
 
 
 def _plan_to_result(root: dict, is_profile: bool) -> ReadResult:

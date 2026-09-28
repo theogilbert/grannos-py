@@ -204,7 +204,7 @@ class TestStripComments:
 
     def test_leaves_an_escaped_quote_inside_a_string(self) -> None:
         query = '{"find": "a\\"//b", "db": "x"} // c'
-        assert _strip_comments(query) == '{"find": "a\\"//b", "db": "x"} '
+        assert _strip_comments(query) == '{"find": "a\\"//b", "db": "x"}     '
 
     async def test_execute_accepts_a_commented_command(self) -> None:
         client, _, col = _open_client()

@@ -80,6 +80,18 @@ class TestExecute:
         assert result.columns == ["n", "s"]
         assert result.rows == [["1", "hello"]]
 
+    async def test_should_accept_comments(self, driver: Neo4jDriver) -> None:
+        result = await driver.execute("// one\nRETURN 1 /* the */ AS n // n", [])
+        assert isinstance(result, ReadResult)
+        assert result.rows == [["1"]]
+
+    async def test_should_explain_after_a_block_comment(
+        self, driver: Neo4jDriver
+    ) -> None:
+        result = await driver.execute("/* plan */ EXPLAIN MATCH (n) RETURN n", [])
+        assert isinstance(result, ReadResult)
+        assert result.rows
+
     async def test_should_support_positional_params(self, driver: Neo4jDriver) -> None:
         result = await driver.execute("RETURN $0 AS val", [42])
         assert isinstance(result, ReadResult)

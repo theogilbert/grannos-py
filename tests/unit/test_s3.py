@@ -272,6 +272,14 @@ class TestExecuteLs:
             "etag",
         ]
 
+    async def test_comments_are_ignored(self) -> None:
+        client = MagicMock()
+        client.list_buckets.return_value = {"Buckets": []}
+        driver = _make_driver(client)
+        result = await driver.execute("# every bucket\nls # none filtered", [])
+        assert isinstance(result, ReadResult)
+        client.list_buckets.assert_called_once()
+
     async def test_ls_bucket_lists_objects(self) -> None:
         client = MagicMock()
         client.get_paginator.return_value = _paginated(

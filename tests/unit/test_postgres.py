@@ -263,6 +263,12 @@ class TestExecuteRecordsSessionStatements:
         asyncio.run(driver.execute(stmt))
         assert driver._session_statements == {"search_path": stmt}
 
+    def test_records_after_a_leading_comment(self) -> None:
+        driver, _ = _make_driver()
+        stmt = "-- schema\nSET search_path = 'public'"
+        asyncio.run(driver.execute(stmt))
+        assert driver._session_statements == {"search_path": stmt}
+
     def test_later_value_replaces_earlier(self) -> None:
         driver, _ = _make_driver()
         first = "SET search_path = 'public'"

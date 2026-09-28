@@ -122,6 +122,8 @@ SELECT o.id, c.name FROM dbo.orders o JOIN dbo.customers c ON c.id = o.customer_
 INSERT INTO dbo.orders (customer_id, status) VALUES (1, 'open')
 ```
 
+**Comments:** `--` to the end of the line, and `/* ... */`.
+
 **Resources:**
 
 ```

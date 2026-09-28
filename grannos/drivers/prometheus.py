@@ -32,6 +32,7 @@ from ..protocol import (
     WriteResult,
 )
 from .base import BaseDriver, ConnectionLostError, DriverError, DriverSettings
+from .comments import blank_comments
 
 _DEFAULT_URL = "http://localhost:9090"
 
@@ -139,6 +140,8 @@ row per series per timestamp), with a column per label plus `timestamp` and `val
 Scalar/string results return a single `timestamp`/`value` row. A `value` of `NaN`,
 `+Inf`, or `-Inf` (e.g. from a division in the expression) is returned as a
 `SpecialFloat` — plain JSON cannot represent these — rather than a numeric `value`.
+
+**Comments:** `#` to the end of the line.
 
 **Resources:**
 
@@ -255,6 +258,10 @@ job name; instance/job already group the record).
             diagram_captions: Unused for Prometheus (not a graph driver).
         """
         mode = self._session_values.get("query_mode", "instant")
+        # PromQL has `#` comments of its own, but the range header is parsed
+        # here: a comment ahead of it, or holding a ` | `, would be read as part
+        # of it.
+        query = blank_comments(query, line=("#",), quotes="\"'`")
         if mode == "instant":
             return await self._execute_instant(query)
         if mode == "range":

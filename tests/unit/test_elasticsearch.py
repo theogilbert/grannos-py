@@ -149,6 +149,20 @@ class TestExecuteDevToolsErrors:
             await driver.execute("GET /missing/_search", [])
 
 
+class TestExecuteDevToolsComments:
+    async def test_comments_are_blanked(self) -> None:
+        driver = _driver_with_response({"acknowledged": True})
+        await driver.execute(
+            "# search open orders\n"
+            "GET /orders/_search?q=url:http://x // all\n"
+            '{"query": /* any */ {"match_all": {}}, # c\n "size": 1}',
+            [],
+        )
+        args, kwargs = driver._client.perform_request.call_args  # ty: ignore[unresolved-attribute]
+        assert args == ("GET", "/orders/_search?q=url:http://x")
+        assert kwargs["body"] == {"query": {"match_all": {}}, "size": 1}
+
+
 def _lucene_driver() -> tuple[ElasticsearchDriver, MagicMock]:
     client = MagicMock()
     client.search = AsyncMock(
@@ -398,8 +412,29 @@ class TestLuceneSessionSettings:
         assert kwargs["sort"] == [{"total": {"order": "asc"}}]
         assert kwargs["q"] == "*"
 
+    async def test_comments_are_blanked(self) -> None:
+        driver, client = _lucene_driver()
+        await driver.execute("-- open | orders\norders | status:open -- mine\n", [])
+        kwargs = client.search.call_args.kwargs
+        assert kwargs["index"] == "orders"
+        assert kwargs["q"] == "status:open"
+
+    async def test_double_dash_inside_a_term_is_kept(self) -> None:
+        driver, client = _lucene_driver()
+        await driver.execute("orders | a--b", [])
+        assert client.search.call_args.kwargs["q"] == "a--b"
+
 
 class TestEsqlSessionSettings:
+    async def test_line_comment_does_not_swallow_spliced_settings(self) -> None:
+        client = MagicMock()
+        client.esql.query = AsyncMock(return_value={"columns": [], "values": []})
+        driver = ElasticsearchDriver({"query_mode": "esql"}, client, DriverSettings())
+        await driver.set_session({"sort_field": "total"})
+        await driver.execute("FROM orders // all | of them\n| LIMIT 10 // ten", [])
+        sent = client.esql.query.call_args.kwargs["query"]
+        assert " ".join(sent.split()) == "FROM orders | SORT total DESC | LIMIT 10"
+
     async def test_time_range_follows_source_command(self) -> None:
         driver = _esql_driver()
         await driver.set_session({"time_from": "2024-01-01T00:00:00Z"})

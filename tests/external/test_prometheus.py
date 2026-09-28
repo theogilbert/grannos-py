@@ -72,6 +72,11 @@ class TestExecuteInstant:
         with pytest.raises(DriverError):
             await driver.execute("up(((", [])
 
+    async def test_ignores_comments(self, driver: PrometheusDriver) -> None:
+        result = await driver.execute("# all targets\nup # scraped", [])
+        assert isinstance(result, ReadResult)
+        assert result.rows_total >= 1
+
 
 class TestExecuteRange:
     async def test_returns_rows_across_the_window(
@@ -80,6 +85,13 @@ class TestExecuteRange:
         result = await range_driver.execute("-1m,now,15s | up", [])
         assert isinstance(result, ReadResult)
         assert "timestamp" in result.columns
+        assert result.rows_total >= 1
+
+    async def test_ignores_comments(self, range_driver: PrometheusDriver) -> None:
+        result = await range_driver.execute(
+            "# last | minute\n-1m,now,15s | up # all", []
+        )
+        assert isinstance(result, ReadResult)
         assert result.rows_total >= 1
 
     async def test_missing_separator_raises(

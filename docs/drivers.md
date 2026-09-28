@@ -19,6 +19,8 @@ actually use need to be installed.
 SELECT * FROM users WHERE age > ?
 ```
 
+**Comments:** `--` to the end of the line, and `/* ... */`.
+
 **Explore tree:**
 
 ```
@@ -50,6 +52,8 @@ SELECT * FROM read_parquet('/path/to/file.parquet')
 SELECT * FROM read_csv('/path/to/file.csv', header = true)
 SELECT * FROM 'glob/**/*.parquet'
 ```
+
+**Comments:** `--` to the end of the line, and `/* ... */`.
 
 **Explore tree:**
 
@@ -87,6 +91,8 @@ SELECT * FROM 'glob/**/*.parquet'
 SELECT * FROM dbo.orders WHERE status = ?
 ```
 
+**Comments:** `--` to the end of the line, and `/* ... */`.
+
 **Explore tree:**
 
 ```
@@ -122,6 +128,9 @@ column metadata (name, type, nullability, default).
 SELECT * FROM employees WHERE department_id = :1 AND hire_date > :2
 ```
 
+**Comments:** `--` to the end of the line, and `/* ... */`. They reach
+Oracle with the statement, so an optimizer hint (`/*+ ... */`) takes effect.
+
 **Explore tree:**
 
 ```
@@ -156,6 +165,8 @@ MATCH (u:User {name: $0})-[:BOUGHT]->(p:Product) RETURN u, p
 
 Results are serialized and flattened: nodes expand to `col._labels`, `col.prop`,
 …; relationships expand to `col._type`, `col.prop`, …
+
+**Comments:** `//` to the end of the line, and `/* ... */`.
 
 **Explore tree:**
 
@@ -311,6 +322,11 @@ warning-level message naming the field, since a name that matches nothing
 silently disables the time range and the histogram. An empty result, a Dev
 Tools request, or an ES|QL query that aggregates (`STATS`) is not checked.
 
+**Comments:** Lucene has no comment syntax of its own; `--` to the end of
+the line is stripped before the query is sent, wherever a term could start
+(`a--b` stays one term). Dev Tools takes Kibana Console's `#` and `//` line
+comments and `/* ... */` blocks; ES|QL has `//` and `/* ... */` natively.
+
 **Time range and sorting:** five session settings — changeable any time via
 `session.set`, no reconnect needed — apply to every Lucene and ES|QL query.
 Dev Tools queries are sent exactly as written.
@@ -398,6 +414,8 @@ timestamp, or a raw Unix timestamp. `step` is a Prometheus duration (`15s`, `1m`
 Vector/matrix results are flattened to one row per series (range queries emit one
 row per series per timestamp), with a column per label plus `timestamp` and `value`.
 Scalar/string results return a single `timestamp`/`value` row.
+
+**Comments:** `#` to the end of the line.
 
 **Explore tree:**
 

@@ -102,6 +102,18 @@ class TestExecute:
         assert result.columns == ["n", "s"]
         assert result.rows == [[1, "hello"]]
 
+    async def test_should_accept_comments(self, driver: PostgresDriver) -> None:
+        result = await driver.execute("-- one\nSELECT 1 /* the */ AS n -- n", [])
+        assert isinstance(result, ReadResult)
+        assert result.rows == [[1]]
+
+    async def test_should_record_set_after_a_comment(
+        self, driver: PostgresDriver
+    ) -> None:
+        stmt = "/* tz */ SET search_path = public"
+        await driver.execute(stmt, [])
+        assert driver._session_statements == {"search_path": stmt}
+
     async def test_should_support_positional_params(
         self, driver: PostgresDriver
     ) -> None:

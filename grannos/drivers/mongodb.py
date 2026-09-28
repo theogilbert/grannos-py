@@ -33,6 +33,7 @@ from ..protocol import (
 )
 from ..tabular import flatten_docs
 from .base import BaseDriver, ConnectionLostError, DriverError, DriverSettings
+from .comments import blank_comments
 
 _DEFAULT_FIND_LIMIT = 1000
 _GRIDFS_PREFIX = "gridfs."
@@ -616,33 +617,14 @@ to fetch its full content later without re-running the query.
 
 
 def _strip_comments(query: str) -> str:
-    """Return ``query`` with ``//`` line and ``/* */`` block comments removed.
+    """Return ``query`` with ``//`` line and ``/* */`` block comments blanked out.
 
     Extended JSON has no comment syntax, but a query file does (the ``mongo``
     editor grammar treats both as whitespace), and a comment sent along with
     the command must not make it invalid JSON. Comment markers inside a
     string are left alone; a ``//`` in a URL value is not a comment.
     """
-    out: list[str] = []
-    i, n = 0, len(query)
-    while i < n:
-        ch = query[i]
-        if ch == '"':
-            end = i + 1
-            while end < n and query[end] != '"':
-                end += 2 if query[end] == "\\" else 1
-            out.append(query[i : end + 1])
-            i = end + 1
-        elif query.startswith("//", i):
-            eol = query.find("\n", i)
-            i = n if eol < 0 else eol
-        elif query.startswith("/*", i):
-            close = query.find("*/", i + 2)
-            i = n if close < 0 else close + 2
-        else:
-            out.append(ch)
-            i += 1
-    return "".join(out)
+    return blank_comments(query, line=("//",), block=True)
 
 
 def _gridfs_file_row(db_name: str, bucket: str, doc: dict[str, Any]) -> dict[str, Any]:

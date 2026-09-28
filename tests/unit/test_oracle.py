@@ -348,6 +348,12 @@ class TestAlterSessionProperty:
     def test_leading_whitespace(self) -> None:
         assert _alter_session_property("   ALTER SESSION SET FOO = 1") == "FOO"
 
+    def test_leading_comments(self) -> None:
+        assert (
+            _alter_session_property("-- fmt\n/* x */ ALTER SESSION SET FOO = 1")
+            == "FOO"
+        )
+
     def test_non_alter_session_returns_none(self) -> None:
         assert _alter_session_property("SELECT 1 FROM DUAL") is None
 
@@ -672,6 +678,9 @@ class TestStatementStartLine:
 
     def test_skips_leading_comments(self) -> None:
         assert _statement_start_line("-- a\n-- b\nSELECT 1") == 3
+
+    def test_skips_block_comments(self) -> None:
+        assert _statement_start_line("/* a\nb */\n-- c\nSELECT 1") == 4
 
     def test_skips_blank_lines(self) -> None:
         assert _statement_start_line("\n\nSELECT 1") == 3
@@ -1145,6 +1154,15 @@ class TestExecuteLoad:
         statement, rows = cur.executemany.call_args[0]
         assert statement == "INSERT INTO employees VALUES (:1, :2)"
         assert rows == [["1", "alice"], ["2", "bob"]]
+
+    def test_leading_comment_before_load(self, tmp_path) -> None:
+        path = tmp_path / "e.csv"
+        path.write_text("1,alice\n")
+        driver, cur = _make_load_driver()
+        query = f"-- seed\n/* x */ LOAD employees FROM '{path}' -- done"
+        result = asyncio.run(driver.execute(query))
+        assert isinstance(result, WriteResult)
+        assert result.rows_affected == 1
 
     def test_header_supplies_column_names(self, tmp_path) -> None:
         path = tmp_path / "e.csv"

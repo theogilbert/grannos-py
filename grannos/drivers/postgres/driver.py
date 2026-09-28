@@ -31,6 +31,7 @@ from ..base import (
     group_references_by_column,
     group_references_by_ref_column,
 )
+from ..comments import blank_comments
 from .copy import (
     CopyFromCommand,
     CopyToCommand,
@@ -135,6 +136,8 @@ straight through to Postgres's `COPY` command, same options as above.
 \\copy orders (id, status) FROM '/tmp/orders_partial.csv' (FORMAT csv, HEADER)
 ```
 
+**Comments:** `--` to the end of the line, and `/* ... */`.
+
 **Resources:**
 
 ```
@@ -226,11 +229,16 @@ after an idle timeout).
         Raises:
             ConnectionLostError: If the connection was lost during execution.
         """
-        copy_cmd = parse_copy_to(query)
+        # Postgres reads comments itself, so the query goes out as written;
+        # `code` is only for recognising it here.
+        code = blank_comments(
+            query, line=("--",), block=True, quotes="'\"", escape=None
+        )
+        copy_cmd = parse_copy_to(code)
         if copy_cmd is not None:
             return await self._execute_copy_to(copy_cmd)
 
-        copy_from_cmd = parse_copy_from(query)
+        copy_from_cmd = parse_copy_from(code)
         if copy_from_cmd is not None:
             return await self._execute_copy_from(copy_from_cmd)
 
@@ -242,7 +250,7 @@ after an idle timeout).
         try:
             cur = self._conn.cursor()
             await _exec(cur, sql.SQL(query), params, private=True)  # ty: ignore[invalid-argument-type]
-            prop = _set_property(query)
+            prop = _set_property(code)
             if prop is not None:
                 self._session_statements[prop] = query
             if cur.description is not None:

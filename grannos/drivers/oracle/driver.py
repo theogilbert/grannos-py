@@ -37,6 +37,7 @@ from ..base import (
     group_references_by_column,
     group_references_by_ref_column,
 )
+from ..comments import blank_comments
 from .load import (
     LoadCommand,
     LoadOptions,
@@ -137,6 +138,9 @@ SELECT e.id, d.name FROM employees e JOIN departments d ON d.id = e.department_i
 INSERT INTO employees (department_id, name) VALUES (10, 'Alice')
 ALTER SESSION SET NLS_LENGTH_SEMANTICS = CHAR
 ```
+
+**Comments:** `--` to the end of the line, and `/* ... */`. They reach
+Oracle with the statement, so an optimizer hint (`/*+ ... */`) takes effect.
 
 ### Importing from a file
 
@@ -321,12 +325,15 @@ after an idle timeout.
         Raises:
             ConnectionLostError: If the connection was lost during execution.
         """
-        load_cmd = parse_load(query)
+        # Oracle reads comments itself (and a `/*+ */` hint is one), so the
+        # query goes out as written; `code` is only for parsing it here.
+        code = _blank_comments(query)
+        load_cmd = parse_load(code)
         if load_cmd is not None:
             return await self._execute_load(load_cmd)
 
         binds = binds or []
-        _reject_sqlplus_terminator(query)
+        _reject_sqlplus_terminator(code)
 
         try:
             cur = self._conn.cursor()
@@ -1002,13 +1009,14 @@ def _format_type(col: ColumnDetail) -> str:
     return f"{col.type}({col.char_length})"
 
 
+def _blank_comments(query: str) -> str:
+    """*query* with its ``--`` and ``/* */`` comments blanked out, for reading
+    which statement it holds without being misled by a leading comment."""
+    return blank_comments(query, line=("--",), block=True, quotes="'\"", escape=None)
+
+
 def _is_explain_plan(query: str) -> bool:
-    for line in query.splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("--"):
-            continue
-        return stripped.upper().startswith("EXPLAIN PLAN")
-    return False
+    return re.match(r"\s*EXPLAIN\s+PLAN\b", _blank_comments(query), re.I) is not None
 
 
 _CREATE_OBJECT_RE = re.compile(
@@ -1027,7 +1035,7 @@ def _created_object(query: str) -> tuple[str, str] | None:
     The name is upper-cased unless it was double-quoted, matching how Oracle
     stores it in ``user_errors``. Returns None for any other statement.
     """
-    match = _CREATE_OBJECT_RE.match(_strip_leading_comments(query))
+    match = _CREATE_OBJECT_RE.match(_blank_comments(query))
     if match is None:
         return None
     quoted, unquoted = match.group("nq"), match.group("nu")
@@ -1037,23 +1045,15 @@ def _created_object(query: str) -> tuple[str, str] | None:
 
 
 def _statement_start_line(query: str) -> int:
-    """1-indexed line of the first line that isn't blank or a ``--`` comment.
+    """1-indexed line the statement starts on, past blank and comment lines.
 
     Oracle numbers compilation errors from the start of the object's source, so
     any preamble in the submitted query has to be added back to make the line
     numbers line up with what the user is looking at.
     """
-    for offset, line in enumerate(query.splitlines()):
-        stripped = line.strip()
-        if stripped and not stripped.startswith("--"):
-            return offset + 1
-    return 1
-
-
-def _strip_leading_comments(query: str) -> str:
-    lines = query.splitlines()
-    start = _statement_start_line(query) - 1
-    return "\n".join(lines[start:])
+    code = _blank_comments(query)
+    body = code.lstrip()
+    return code[: len(code) - len(body)].count("\n") + 1 if body else 1
 
 
 def _reject_sqlplus_terminator(query: str) -> None:
@@ -1081,7 +1081,7 @@ _ALTER_SESSION_RE = re.compile(
 def _alter_session_property(query: str) -> str | None:
     """Return the upper-cased property name if *query* is an ``ALTER SESSION
     SET <property> = ...`` statement, else None."""
-    match = _ALTER_SESSION_RE.match(query)
+    match = _ALTER_SESSION_RE.match(_blank_comments(query))
     return match.group(1).upper() if match else None
 
 

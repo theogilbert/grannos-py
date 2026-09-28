@@ -131,6 +131,21 @@ class TestExecute:
         with pytest.raises(DriverError, match="index.*query"):
             await driver.execute("no separator here", [])
 
+    async def test_ignores_comments(self, driver: ElasticsearchDriver) -> None:
+        await _index_docs(
+            driver,
+            [
+                {"name": "Alice", "status": "active"},
+                {"name": "Bob", "status": "inactive"},
+            ],
+        )
+        result = await driver.execute(
+            f"-- active | only\n{_INDEX} | status:active -- not Bob\n", []
+        )
+        assert isinstance(result, ReadResult)
+        names = [row[result.columns.index("name")] for row in result.rows]
+        assert names == ["Alice"]
+
 
 class TestExecuteDSL:
     async def test_match_all_returns_rows(
@@ -173,6 +188,25 @@ class TestExecuteDSL:
         with pytest.raises(DriverError, match="Kibana Dev Tools"):
             await dev_tools_driver.execute("just a query with no method", [])
 
+    async def test_ignores_comments(
+        self, dev_tools_driver: ElasticsearchDriver
+    ) -> None:
+        await _index_docs(
+            dev_tools_driver,
+            [
+                {"name": "Alice", "status": "active"},
+                {"name": "Bob", "status": "inactive"},
+            ],
+        )
+        result = await dev_tools_driver.execute(
+            f"# active only\nGET /{_INDEX}/_search // search\n"
+            '{"query": /* exact */ {"term": {"status": "active"}}} # done',
+            [],
+        )
+        assert isinstance(result, ReadResult)
+        names = [row[result.columns.index("name")] for row in result.rows]
+        assert names == ["Alice"]
+
 
 class TestExecuteEsql:
     async def test_returns_columns_and_rows(
@@ -205,6 +239,25 @@ class TestExecuteEsql:
     ) -> None:
         with pytest.raises(DriverError):
             await esql_driver.execute("NOT A VALID ESQL QUERY", [])
+
+    async def test_ignores_comments_around_spliced_settings(
+        self, esql_driver: ElasticsearchDriver
+    ) -> None:
+        await _index_docs(
+            esql_driver,
+            [
+                {"name": "Alice", "status": "active"},
+                {"name": "Bob", "status": "active"},
+            ],
+        )
+        await esql_driver.set_session({"sort_field": "name", "sort_order": "asc"})
+        result = await esql_driver.execute(
+            f"// both\nFROM {_INDEX} // source | not a command\n"
+            '| WHERE status == "active" /* only */ | KEEP name // name only',
+            [],
+        )
+        assert isinstance(result, ReadResult)
+        assert result.rows == [["Alice"], ["Bob"]]
 
 
 class TestExploreList:

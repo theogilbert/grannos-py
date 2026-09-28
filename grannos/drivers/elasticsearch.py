@@ -27,6 +27,7 @@ from ..protocol import (
 )
 from ..tabular import flatten_docs
 from .base import BaseDriver, ConnectionLostError, DriverError, DriverSettings
+from .comments import blank_comments
 
 _DEFAULT_SEARCH_SIZE = 1000
 _DEFAULT_TIME_FIELD = "@timestamp"
@@ -246,6 +247,11 @@ flattened as a single row.
 
 System indices (names starting with `.`) are hidden in the resource tree.
 
+**Comments:** Lucene has no comment syntax of its own; `--` to the end of
+the line is stripped before the query is sent, wherever a term could start
+(`a--b` stays one term). Dev Tools takes Kibana Console's `#` and `//` line
+comments and `/* ... */` blocks; ES|QL has `//` and `/* ... */` natively.
+
 **Time range and sorting:** five session settings — changeable any time via
 `session.set`, no reconnect needed — apply to every Lucene and ES|QL query.
 Dev Tools queries are sent exactly as written.
@@ -345,6 +351,7 @@ Describing an index returns field metadata from its mapping (name, type).
 
     async def _execute(self, query: str) -> ReadResult:
         mode = self.params.get("query_mode", "lucene")
+        query = _blank_comments(query, mode)
         if mode == "lucene":
             return self._warn_missing_time_field(await self._execute_lucene(query))
         elif mode == "dev_tools":
@@ -479,6 +486,7 @@ Describing an index returns field metadata from its mapping (name, type).
             )
         if mode not in ("lucene", "esql"):
             raise DriverError(f"Unknown query_mode: {mode!r}")
+        query = _blank_comments(query, mode)
         try:
             if mode == "lucene":
                 return await self._histogram_lucene(query, buckets)
@@ -887,6 +895,24 @@ def _esql_identifier(name: str) -> str:
     if _PLAIN_IDENTIFIER_RE.match(name):
         return name
     return "`" + name.replace("`", "``") + "`"
+
+
+def _blank_comments(query: str, mode: str) -> str:
+    """Blank out the comments of a query in the given query mode.
+
+    Lucene has no comment syntax: `--` is the query file's own (a `-` cannot
+    start the term it prohibits, so `--` never starts a valid token), and must
+    not reach Elasticsearch. Dev Tools takes Kibana Console's `#` and `//` line
+    and `/* */` block comments, which the JSON body parser would reject.
+    ES|QL has `//` and `/* */` natively, but the session settings are spliced
+    in after the source command and at the end of the query, where a line
+    comment would swallow them.
+    """
+    if mode == "lucene":
+        return blank_comments(query, line=("--",), quotes='"/', after="!():^<>=[]{}~|")
+    if mode == "dev_tools":
+        return blank_comments(query, line=("#", "//"), block=True, after=",{}[]")
+    return blank_comments(query, line=("//",), block=True, quotes='"`')
 
 
 def _split_commands(query: str) -> list[tuple[int, int]]:

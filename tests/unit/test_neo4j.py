@@ -100,6 +100,9 @@ class TestPlanKeyword:
     def test_leading_comment_skipped(self) -> None:
         assert _plan_keyword("// find all\nEXPLAIN MATCH (n) RETURN n") == "explain"
 
+    def test_leading_block_comment_skipped(self) -> None:
+        assert _plan_keyword("/* find\nall */ PROFILE MATCH (n) RETURN n") == "profile"
+
     def test_regular_query_returns_none(self) -> None:
         assert _plan_keyword("MATCH (n) RETURN n") is None
 

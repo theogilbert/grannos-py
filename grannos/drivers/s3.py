@@ -29,6 +29,7 @@ from ..protocol import (
     WriteResult,
 )
 from .base import BaseDriver, ConnectionLostError, DriverError, DriverSettings
+from .comments import blank_comments
 
 T = TypeVar("T")
 
@@ -117,6 +118,9 @@ by deleting the source (local file or S3 key, whichever side was the source).
 `--recursive` copies/moves/removes everything under a prefix or local
 directory, preserving relative paths.
 
+**Comments:** `#` to the end of the line, starting a word as in a shell —
+`s3://bucket/a#b` names a key, it does not start a comment.
+
 **Resources:**
 
 ```
@@ -176,7 +180,11 @@ objects larger than 25 MB are refused.
             binds: Unused for S3.
         """
         try:
-            tokens = shlex.split(query)
+            # `#` comments as in a shell: only at the start of a word, so a key
+            # holding one (`s3://b/a#b`) is left whole.
+            tokens = shlex.split(
+                blank_comments(query, line=("#",), quotes="'\"", after="")
+            )
         except ValueError as exc:
             raise DriverError(f"Could not parse command: {exc}") from exc
         if not tokens:

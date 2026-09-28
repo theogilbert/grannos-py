@@ -72,6 +72,8 @@ SELECT u.id, o.total FROM users u JOIN orders o ON o.user_id = u.id
 INSERT INTO users (name, age) VALUES ('Alice', 30)
 ```
 
+**Comments:** `--` to the end of the line, and `/* ... */`.
+
 **Resources:**
 
 ```
