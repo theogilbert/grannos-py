@@ -7,7 +7,12 @@ from typing import Any
 
 from .diagram import DiagramError, build_diagram
 from .drivers import get_driver, get_driver_help, list_drivers
-from .drivers.base import BaseDriver, ConnectionLostError, DriverSettings
+from .drivers.base import (
+    BaseDriver,
+    ConnectionLostError,
+    DriverError,
+    DriverSettings,
+)
 from .explore_cache import CachingDriver, ConnectionCache, cache_file
 from .protocol import (
     PROTOCOL_VERSION,
@@ -435,7 +440,10 @@ class Dispatcher:
             await send_progress("reconnecting", "Connection lost — reconnecting…")
             await conn.driver.reconnect()
             await send_progress("executing", "Reconnected — executing request…")
-            return await coro_fn()
+            try:
+                return await coro_fn()
+            except ConnectionLostError as exc:
+                raise DriverError(str(exc) or "connection lost") from exc
 
     def _require_conn(self, params: dict[str, Any]) -> Connection:
         conn_id = params.get("connection_id") or ""

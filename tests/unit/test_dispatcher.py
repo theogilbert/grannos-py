@@ -7,7 +7,7 @@ from unittest.mock import ANY, AsyncMock, MagicMock, patch
 import pytest
 
 from grannos.dispatcher import Connection, Dispatcher, DispatchError, IdleTimer
-from grannos.drivers.base import ConnectionLostError, DriverSettings
+from grannos.drivers.base import ConnectionLostError, DriverError, DriverSettings
 from grannos.protocol import (
     PROTOCOL_VERSION,
     DriverParam,
@@ -495,6 +495,21 @@ class TestExecute:
         assert result == ExecuteReadResult(
             columns=["n"], rows=[[42]], rows_total=1, duration_ms=ANY
         )
+
+    async def test_reports_driver_error_when_connection_lost_after_reconnect(
+        self, connected: tuple[Dispatcher, str, AsyncMock]
+    ) -> None:
+        disp, conn_id, driver = connected
+        driver.execute.side_effect = [
+            ConnectionLostError("link down"),
+            ConnectionLostError("link down"),
+        ]
+        with pytest.raises(DriverError, match="link down"):
+            await disp.dispatch(
+                Method.EXECUTE,
+                {"connection_id": conn_id, "query": "SELECT 1"},
+                noop_progress,
+            )
 
     async def test_reconnects_when_connection_is_lost(
         self, connected: tuple[Dispatcher, str, AsyncMock]

@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 import mssql_python
 import pytest
 
-from grannos.drivers.base import ConnectionLostError, DriverSettings
+from grannos.drivers.base import ConnectionLostError, DriverError, DriverSettings
 from grannos.drivers.sqlserver import SQLServerDriver, _render_lob
 from grannos.protocol import LobPlaceholder, ReadResult
 
@@ -65,6 +65,27 @@ class TestConnectionLostTranslation:
         conn.execute.side_effect = _closed_connection_error()
         driver = SQLServerDriver({}, conn, DriverSettings())
         with pytest.raises(ConnectionLostError):
+            asyncio.run(driver.execute("SELECT 1", []))
+
+    def test_communication_link_failure_raises_connection_lost(self) -> None:
+        conn = MagicMock()
+        conn.execute.side_effect = mssql_python.OperationalError(
+            driver_error="Communication link failure", ddbc_error="TCP reset"
+        )
+        driver = SQLServerDriver({}, conn, DriverSettings())
+        with pytest.raises(ConnectionLostError):
+            asyncio.run(driver.execute("SELECT 1", []))
+
+    def test_database_access_denied_is_driver_error(self) -> None:
+        # Error 916 arrives as SQLSTATE 08004 on a live connection: a
+        # reconnect cannot fix it, so it must not be treated as a lost link.
+        conn = MagicMock()
+        conn.execute.side_effect = mssql_python.OperationalError(
+            driver_error="Server rejected the connection",
+            ddbc_error="The server principal is not able to access the database",
+        )
+        driver = SQLServerDriver({}, conn, DriverSettings())
+        with pytest.raises(DriverError, match="not able to access"):
             asyncio.run(driver.execute("SELECT 1", []))
 
     def test_explore_list_raises_connection_lost(self) -> None:

@@ -836,8 +836,25 @@ nullability, default).
         )
 
 
+# mssql-python's ``driver_error`` for the SQLSTATEs that mean the link itself
+# is gone (01002, 08003, 08007, 08S01). OperationalError also covers errors a
+# reconnect cannot fix — timeouts, cancels, and 08004, which SQL Server reports
+# for error 916 (principal cannot access a database) on a perfectly live link.
+_LINK_FAILURES = frozenset(
+    {
+        "Disconnect error",
+        "Connection not open",
+        "Connection failure during transaction",
+        "Communication link failure",
+    }
+)
+
+
 def _maybe_raise_connection_lost(exc: Exception) -> None:
-    if isinstance(exc, (mssql_python.OperationalError, mssql_python.InterfaceError)):
+    if isinstance(exc, mssql_python.InterfaceError) or (
+        isinstance(exc, mssql_python.OperationalError)
+        and exc.driver_error in _LINK_FAILURES
+    ):
         raise ConnectionLostError(str(exc)) from exc
 
 
