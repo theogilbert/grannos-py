@@ -160,7 +160,24 @@ class TestExecuteDevToolsComments:
         )
         args, kwargs = driver._client.perform_request.call_args  # ty: ignore[unresolved-attribute]
         assert args == ("GET", "/orders/_search?q=url:http://x")
-        assert kwargs["body"] == {"query": {"match_all": {}}, "size": 1}
+        assert kwargs["body"] == {
+            "query": {"match_all": {}},
+            "size": 1,
+            "track_total_hits": True,
+        }
+
+
+class TestExecuteDevToolsTotalHits:
+    async def test_explicit_track_total_hits_is_kept(self) -> None:
+        driver = _driver_with_response({"hits": {"hits": [{"_id": "1"}]}})
+        result = await driver.execute(
+            'GET /orders/_search\n{"track_total_hits": false}', []
+        )
+        _, kwargs = driver._client.perform_request.call_args  # ty: ignore[unresolved-attribute]
+        assert kwargs["body"]["track_total_hits"] is False
+        # No `total` in the response: fall back to the hits returned.
+        assert isinstance(result, ReadResult)
+        assert result.rows_total == 1
 
 
 def _lucene_driver() -> tuple[ElasticsearchDriver, MagicMock]:
@@ -367,8 +384,19 @@ class TestLuceneSessionSettings:
         assert client.search.call_args.kwargs == {
             "index": "orders",
             "size": 1000,
+            "track_total_hits": True,
             "q": "status:open",
         }
+
+    async def test_total_is_exact_past_ten_thousand(self) -> None:
+        driver, client = _lucene_driver()
+        client.search.return_value = {
+            "hits": {"total": {"value": 25000, "relation": "eq"}, "hits": []}
+        }
+        result = await driver.execute("orders | *", [])
+        assert client.search.call_args.kwargs["track_total_hits"] is True
+        assert isinstance(result, ReadResult)
+        assert result.rows_total == 25000
 
     async def test_time_range_becomes_filtered_bool_query(self) -> None:
         driver, client = _lucene_driver()

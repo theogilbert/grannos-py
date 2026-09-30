@@ -391,6 +391,8 @@ Describing an index returns field metadata from its mapping (name, type).
     async def _execute_lucene(self, query: str) -> ReadResult:
         kwargs, applied = self._lucene_search(query)
         kwargs["size"] = _DEFAULT_SEARCH_SIZE
+        # Without it Elasticsearch stops counting at 10,000 hits.
+        kwargs["track_total_hits"] = True
         if sort := self._sort_clause():
             kwargs["sort"] = sort
             applied.append(f"sort={json.dumps(sort)}")
@@ -446,6 +448,7 @@ Describing an index returns field metadata from its mapping (name, type).
         body, headers = self._parse_body(body_str)
         if isinstance(body, dict) and "_search" in path:
             body.setdefault("size", _DEFAULT_SEARCH_SIZE)
+            body.setdefault("track_total_hits", True)
         log_query(logger, query)
         raw = await self._client.perform_request(
             method, path, body=body, headers=headers
@@ -768,7 +771,8 @@ Describing an index returns field metadata from its mapping (name, type).
 
     def _hits_to_result(self, resp: Any) -> ReadResult:
         hits = resp["hits"]["hits"]
-        total = resp["hits"]["total"]
+        # `total` is absent when the caller turned `track_total_hits` off.
+        total = resp["hits"].get("total", len(hits))
         rows_total = total["value"] if isinstance(total, dict) else int(total)
         if not hits:
             return ReadResult(columns=[], rows=[], rows_total=rows_total)
