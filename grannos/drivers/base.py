@@ -2,10 +2,11 @@ import asyncio
 import base64
 import uuid
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, time
 from decimal import Decimal
-from typing import Any, ClassVar, Self
+from typing import Any, ClassVar, Self, TypeVar
 
 from ..protocol import (
     DescribeResult,
@@ -21,6 +22,46 @@ from ..protocol import (
     TableReference,
     WriteResult,
 )
+
+
+T = TypeVar("T")
+
+INTERRUPT_INTERVAL = 0.1
+"""Seconds between repeated interrupts while a cancelled call winds down."""
+
+
+async def run_blocking(
+    fn: Callable[[], T], interrupt: Callable[[], None] | None = None
+) -> T:
+    """Run blocking `fn` in the default executor, honouring task cancellation.
+
+    Cancelling the awaiting task cannot stop the worker thread, so a plain
+    ``run_in_executor`` would leave the query running on the connection while
+    the dispatcher hands that same connection to the next request. Instead, a
+    cancel calls `interrupt` — repeatedly, since one landing between two of
+    `fn`'s statements is a no-op — and waits for `fn` to return before
+    re-raising, so the connection is idle again once the cancel completes.
+
+    Args:
+        fn: The blocking call, run on a worker thread.
+        interrupt: Thread-safe call that aborts the statement `fn` is running.
+            None for a client with no way to do so: the cancel then only waits.
+    """
+    fut = asyncio.get_running_loop().run_in_executor(None, fn)
+    try:
+        return await asyncio.shield(fut)
+    except asyncio.CancelledError:
+        while not fut.done():
+            if interrupt is not None:
+                try:
+                    interrupt()
+                except Exception:
+                    pass  # e.g. connection already closed: just wait it out
+            try:
+                await asyncio.wait([fut], timeout=INTERRUPT_INTERVAL)
+            except asyncio.CancelledError:
+                pass  # already cancelling
+        raise
 
 
 def find_reference(refs: list[TableReference], column: str) -> TableReference | None:

@@ -31,6 +31,7 @@ from .base import (
     find_reference,
     group_references_by_column,
     group_references_by_ref_column,
+    run_blocking,
 )
 
 T = TypeVar("T")
@@ -582,9 +583,7 @@ them yourself, or `delim`/`quote`/`skip` to override the dialect it sniffs.
 
     async def _run(self, fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
         try:
-            return await asyncio.get_running_loop().run_in_executor(
-                None, lambda: fn(*args, **kwargs)
-            )
+            return await run_blocking(lambda: fn(*args, **kwargs), self._conn.interrupt)
         except duckdb.Error as exc:
             raise DriverError(str(exc)) from exc
 

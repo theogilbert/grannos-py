@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import pathlib
 from collections.abc import AsyncGenerator
@@ -635,3 +636,20 @@ class TestQueryLogging:
         with caplog.at_level(logging.INFO):
             await driver.execute("CREATE TABLE t (id INTEGER)", [])
         assert "query" not in caplog.text
+
+
+class TestCancel:
+    async def test_should_abort_running_query(self, driver: SQLiteDriver) -> None:
+        task = asyncio.create_task(
+            driver.execute(
+                "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT count(*) FROM c",
+                [],
+            )
+        )
+        await asyncio.sleep(0.2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=5)
+        result = await driver.execute("SELECT 1", [])
+        assert isinstance(result, ReadResult)
+        assert result.rows == [[1]]

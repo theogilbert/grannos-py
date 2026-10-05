@@ -12,6 +12,7 @@ Tests are skipped automatically when oracledb is not installed or the
 server is unreachable.
 """
 
+import asyncio
 import dataclasses
 import os
 import uuid
@@ -209,6 +210,27 @@ class TestExecute:
         assert isinstance(result, ReadResult)
         assert result.columns == ["ID", "VAL"]
         assert result.rows == [[1, "hello"]]
+
+
+class TestCancel:
+    async def test_should_abort_running_query(self, driver: OracleDriver) -> None:
+        # No explicit conn.cancel(): oracledb's async thin mode already sends
+        # a break when the awaiting task is cancelled, and calling it on top
+        # of that leaves the connection hanging.
+        task = asyncio.create_task(
+            driver.execute(
+                "SELECT COUNT(*) FROM all_objects a, all_objects b, all_objects c"
+            )
+        )
+        await asyncio.sleep(1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=5)
+        result = await asyncio.wait_for(
+            driver.execute("SELECT 1 AS n FROM dual"), timeout=5
+        )
+        assert isinstance(result, ReadResult)
+        assert result.rows == [[1]]
 
 
 class TestUndecodableBytes:

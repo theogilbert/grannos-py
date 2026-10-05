@@ -1,3 +1,4 @@
+import asyncio
 import dataclasses
 from collections.abc import AsyncGenerator
 
@@ -535,3 +536,20 @@ class TestExploreDescribeField:
             await driver.explore_describe(["main", "t", "columns", "no_such_col"])
             is None
         )
+
+
+class TestCancel:
+    async def test_should_abort_running_query(self, driver: DuckDBDriver) -> None:
+        task = asyncio.create_task(
+            driver.execute(
+                "SELECT sum(a.range * b.range) FROM range(100000000) a, range(100000000) b",
+                [],
+            )
+        )
+        await asyncio.sleep(0.2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=5)
+        result = await driver.execute("SELECT 1", [])
+        assert isinstance(result, ReadResult)
+        assert result.rows == [[1]]

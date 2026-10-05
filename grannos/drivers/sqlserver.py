@@ -36,6 +36,7 @@ from .base import (
     find_reference,
     group_references_by_column,
     group_references_by_ref_column,
+    run_blocking,
 )
 
 T = TypeVar("T")
@@ -831,9 +832,9 @@ nullability, default).
             return [], []
 
     async def _run(self, fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
-        return await asyncio.get_running_loop().run_in_executor(
-            None, lambda: fn(*args, **kwargs)
-        )
+        # mssql-python exposes no SQLCancel, so a cancel can only wait the
+        # statement out rather than abort it.
+        return await run_blocking(lambda: fn(*args, **kwargs))
 
 
 # mssql-python's ``driver_error`` for the SQLSTATEs that mean the link itself

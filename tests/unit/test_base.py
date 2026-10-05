@@ -1,6 +1,8 @@
 """Unit tests for shared driver helpers in grannos.drivers.base."""
 
+import asyncio
 import base64
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +13,7 @@ from grannos.drivers.base import (
     DriverError,
     DriverSettings,
     build_column_samples,
+    run_blocking,
 )
 from grannos.protocol import (
     DownloadResult,
@@ -154,3 +157,60 @@ class TestBuildColumnSamples:
 
     def test_no_rows_yields_empty_lists(self) -> None:
         assert build_column_samples(["ID", "VAL"], [], 3) == {"ID": [], "VAL": []}
+
+
+class TestRunBlocking:
+    async def test_should_return_result(self) -> None:
+        assert await run_blocking(lambda: 42) == 42
+
+    async def test_should_interrupt_and_wait_for_fn_on_cancel(self) -> None:
+        started, interrupted = threading.Event(), threading.Event()
+        finished = False
+
+        def fn() -> None:
+            nonlocal finished
+            started.set()
+            interrupted.wait(timeout=5)
+            finished = True
+
+        task = asyncio.create_task(run_blocking(fn, interrupted.set))
+        await asyncio.to_thread(started.wait, 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert interrupted.is_set()
+        assert finished
+
+    async def test_should_wait_without_interrupt(self) -> None:
+        release = threading.Event()
+        finished = False
+
+        def fn() -> None:
+            nonlocal finished
+            release.wait(timeout=5)
+            finished = True
+
+        task = asyncio.create_task(run_blocking(fn))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        await asyncio.sleep(0.05)
+        assert not task.done()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert finished
+
+    async def test_should_ignore_failing_interrupt(self) -> None:
+        release = threading.Event()
+
+        def interrupt() -> None:
+            release.set()
+            raise RuntimeError("connection closed")
+
+        task = asyncio.create_task(
+            run_blocking(lambda: release.wait(timeout=5), interrupt)
+        )
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
