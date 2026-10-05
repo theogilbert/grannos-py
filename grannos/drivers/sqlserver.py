@@ -3,6 +3,10 @@
 import asyncio
 import dataclasses
 import logging
+import os
+import socket
+import stat
+import threading
 from collections.abc import Callable, Sequence
 from typing import Any, TypeVar
 
@@ -33,6 +37,7 @@ from .base import (
     DriverError,
     DriverSettings,
     build_column_samples,
+    check_cancelled,
     find_reference,
     group_references_by_column,
     group_references_by_ref_column,
@@ -40,6 +45,13 @@ from .base import (
 )
 
 T = TypeVar("T")
+
+# mssql-python pools physical connections by default, and a pooled connect
+# reuses a link an earlier connection opened — so its socket cannot be found
+# across the connect (see _connect_tracking_link), and a link severed by a
+# cancel would go back into the pool. grannos holds its connections open for
+# their whole life anyway, so pooling buys it nothing.
+mssql_python.pooling(enabled=False)
 
 _READ_ONLY_INTENT = "READ_ONLY"
 
@@ -53,7 +65,8 @@ def _exec(
     """Log *sql* and run it on *cur*.
 
     Every statement this module sends to the database goes through here, so
-    debug logging of them needs no change at the call sites.
+    debug logging of them — and refusing them once the request is cancelled —
+    needs no change at the call sites.
 
     Args:
         cur: Open cursor to execute on.
@@ -62,6 +75,7 @@ def _exec(
         private: Set for the *user's* own statement, whose binds are user data
             rather than the schema and object names a catalog query binds.
     """
+    check_cancelled()
     log_query(logger, str(sql), None if private else binds)
     if binds:
         cur.execute(sql, list(binds))
@@ -146,9 +160,12 @@ nullability, default).
         params: dict[str, Any],
         conn: "mssql_python.Connection",
         settings: DriverSettings,
+        link: "_Link | None" = None,
     ) -> None:
         super().__init__(params, settings)
         self._conn = conn
+        self._link = link
+        """The socket under `_conn`, severed to abort a cancelled statement."""
 
     @classmethod
     async def create(
@@ -162,22 +179,29 @@ nullability, default).
         Returns:
             A connected SQLServerDriver instance.
         """
-        return cls(params, await cls._open(params), settings)
+        conn, link = await cls._open(params)
+        return cls(params, conn, settings, link)
 
     async def reconnect(self) -> None:
-        self._conn = await self._open(self.params)
+        self._conn, self._link = await self._open(self.params)
 
     async def disconnect(self) -> None:
-        await self._run(self._conn.close)
+        try:
+            await self._run(self._conn.close)
+        except Exception as exc:
+            if not _is_link_failure(exc):  # e.g. severed by a cancel
+                raise
 
     @staticmethod
-    async def _open(params: dict[str, Any]) -> mssql_python.Connection:
+    async def _open(
+        params: dict[str, Any],
+    ) -> "tuple[mssql_python.Connection, _Link | None]":
         intent = params.get("applicationIntent", "")
         loop = asyncio.get_running_loop()
         try:
             return await loop.run_in_executor(
                 None,
-                lambda: mssql_python.connect(
+                lambda: _connect_tracking_link(
                     server=f"{params.get('host', 'localhost')},{params.get('port', 1433)}",
                     uid=params.get("user", ""),
                     pwd=params.get("password", ""),
@@ -211,6 +235,7 @@ nullability, default).
 
     def _execute_sync(self, sql: str, binds: list[Any]) -> ReadResult | WriteResult:
 
+        check_cancelled()
         log_query(logger, sql)  # the user's own statement: text only, no binds
         cur = self._conn.execute(sql, binds)
         if cur.description is not None:
@@ -832,9 +857,98 @@ nullability, default).
             return [], []
 
     async def _run(self, fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
-        # mssql-python exposes no SQLCancel, so a cancel can only wait the
-        # statement out rather than abort it.
-        return await run_blocking(lambda: fn(*args, **kwargs))
+        return await run_blocking(lambda: fn(*args, **kwargs), self._sever_link)
+
+    def _sever_link(self) -> None:
+        """Abort the running statement by cutting the connection under it.
+
+        mssql-python wraps no ``SQLCancel``, and ``close()`` from another
+        thread blocks behind the running statement — holding the GIL, so the
+        whole server with it. Shutting the socket down instead fails the
+        statement at once with a link failure, and SQL Server aborts a
+        request whose client has gone. The connection is dead afterwards:
+        the next request reconnects, rolling back any uncommitted transaction.
+        """
+        if self._link is not None:
+            self._link.sever()
+
+
+_open_lock = threading.Lock()
+"""Serialises connects, so the sockets each opens can be told apart."""
+
+
+@dataclasses.dataclass(frozen=True)
+class _Link:
+    """The TCP socket a connection's ODBC driver opened, by fd and identity.
+
+    The identity (device, inode) guards against the fd having since been
+    closed and reused for an unrelated socket — after an ODBC-level
+    reconnect, say.
+    """
+
+    fd: int
+    identity: tuple[int, int]
+
+    def sever(self) -> None:
+        try:
+            st = os.fstat(self.fd)
+            if (st.st_dev, st.st_ino) != self.identity:
+                return
+            sock = socket.socket(fileno=os.dup(self.fd))
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            finally:
+                sock.close()  # only the dup: the driver's fd stays open
+        except OSError:
+            pass  # already closed or shut down
+
+
+def _connect_tracking_link(
+    **kwargs: Any,
+) -> "tuple[mssql_python.Connection, _Link | None]":
+    """Connect, and find the socket the connection lives on.
+
+    The ODBC driver never exposes its socket, so it is found as the one
+    connected TCP socket that appeared across the connect. Anything less
+    certain — no fd listing on this platform, another socket opened in the
+    meantime — yields no link, and a cancel then waits the statement out.
+    """
+    with _open_lock:
+        before = _tcp_sockets()
+        conn = mssql_python.connect(**kwargs)
+        after = _tcp_sockets()
+    new = after.keys() - before.keys()
+    if len(new) != 1:
+        return conn, None
+    fd = new.pop()
+    return conn, _Link(fd, after[fd])
+
+
+def _tcp_sockets() -> dict[int, tuple[int, int]]:
+    """This process's connected TCP sockets, as fd → (device, inode)."""
+    try:
+        fds = [int(name) for name in os.listdir("/dev/fd")]
+    except OSError:
+        return {}
+    found: dict[int, tuple[int, int]] = {}
+    for fd in fds:
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISSOCK(st.st_mode):
+                continue
+            sock = socket.socket(fileno=os.dup(fd))
+            try:
+                if sock.type == socket.SOCK_STREAM and sock.family in (
+                    socket.AF_INET,
+                    socket.AF_INET6,
+                ):
+                    sock.getpeername()  # raises unless connected
+                    found[fd] = (st.st_dev, st.st_ino)
+            finally:
+                sock.close()
+        except OSError:
+            continue
+    return found
 
 
 # mssql-python's ``driver_error`` for the SQLSTATEs that mean the link itself
@@ -851,11 +965,15 @@ _LINK_FAILURES = frozenset(
 )
 
 
-def _maybe_raise_connection_lost(exc: Exception) -> None:
-    if isinstance(exc, mssql_python.InterfaceError) or (
+def _is_link_failure(exc: Exception) -> bool:
+    return isinstance(exc, mssql_python.InterfaceError) or (
         isinstance(exc, mssql_python.OperationalError)
         and exc.driver_error in _LINK_FAILURES
-    ):
+    )
+
+
+def _maybe_raise_connection_lost(exc: Exception) -> None:
+    if _is_link_failure(exc):
         raise ConnectionLostError(str(exc)) from exc
 
 

@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,7 @@ from grannos.drivers.base import (
     DriverError,
     DriverSettings,
     build_column_samples,
+    check_cancelled,
     run_blocking,
 )
 from grannos.protocol import (
@@ -214,3 +216,73 @@ class TestRunBlocking:
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
+
+    async def test_should_refuse_statements_after_cancel(self) -> None:
+        started, interrupted = threading.Event(), threading.Event()
+        statements: list[str] = []
+
+        def statement(name: str) -> None:
+            check_cancelled()
+            statements.append(name)
+
+        def fn() -> None:
+            statement("first")
+            started.set()
+            interrupted.wait(timeout=5)  # aborted mid-statement...
+            statement("second")  # ...and the next must not start
+
+        task = asyncio.create_task(run_blocking(fn, interrupted.set))
+        await asyncio.to_thread(started.wait, 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert statements == ["first"]
+
+    async def test_should_refuse_statements_without_interrupt(self) -> None:
+        started, release = threading.Event(), threading.Event()
+        statements: list[str] = []
+
+        def fn() -> None:
+            started.set()
+            release.wait(timeout=5)
+            check_cancelled()
+            statements.append("second")
+
+        task = asyncio.create_task(run_blocking(fn))
+        await asyncio.to_thread(started.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0.05)
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert statements == []
+
+    async def test_should_reinterrupt_statement_that_started_late(self) -> None:
+        # The statement passes check_cancelled before the cancel, but only
+        # reaches the database after the first interrupt has come and gone.
+        started, executing, aborted = (threading.Event() for _ in range(3))
+        calls = 0
+
+        def interrupt() -> None:
+            nonlocal calls
+            calls += 1
+            if executing.is_set():
+                aborted.set()
+
+        def fn() -> None:
+            check_cancelled()
+            started.set()
+            time.sleep(0.05)
+            executing.set()
+            aborted.wait(timeout=5)
+
+        task = asyncio.create_task(run_blocking(fn, interrupt))
+        await asyncio.to_thread(started.wait, 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=2)
+        assert aborted.is_set()
+        assert calls == 2
+
+    def test_check_cancelled_should_do_nothing_outside_run_blocking(self) -> None:
+        check_cancelled()

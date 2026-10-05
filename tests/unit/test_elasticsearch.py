@@ -358,7 +358,9 @@ class TestMappings:
             }
         )
         items = await driver.explore_list(["logs-*", "mappings"])
-        driver._client.indices.get_mapping.assert_awaited_once_with(index="logs-*")
+        driver._client.indices.get_mapping.assert_awaited_once_with(  # ty: ignore[unresolved-attribute]
+            index="logs-*"
+        )
         assert {i.name: i.type for i in items} == {
             "host": "ip",
             "level": "keyword",

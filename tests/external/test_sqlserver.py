@@ -12,13 +12,14 @@ Tests are skipped automatically when mssql_python is not installed or the
 server is unreachable.
 """
 
+import asyncio
 import os
 import uuid
 from collections.abc import AsyncGenerator
 
 import pytest
 
-from grannos.drivers.base import DriverSettings
+from grannos.drivers.base import ConnectionLostError, DriverSettings
 from grannos.drivers.sqlserver import SQLServerDriver
 from grannos.protocol import (
     EntityDescription,
@@ -113,6 +114,61 @@ class TestExecute:
         assert isinstance(result, ReadResult)
         assert result.columns == ["id", "val"]
         assert result.rows == [[1, "hello"]]
+
+
+class TestCancel:
+    # Runs for minutes uncancelled: a CPU-bound cross join, single-threaded.
+    SLOW = (
+        "SELECT SUM(CAST(a.object_id AS bigint) * b.column_id % 7 + c.column_id)"
+        " FROM sys.all_columns a CROSS JOIN sys.all_columns b"
+        " CROSS JOIN (SELECT TOP 20 column_id FROM sys.all_columns) c"
+        " OPTION (MAXDOP 1)"
+    )
+
+    async def test_should_abort_running_query_on_server(
+        self, driver: SQLServerDriver
+    ) -> None:
+        result = await driver.execute("SELECT @@SPID", [])
+        assert isinstance(result, ReadResult)
+        spid = result.rows[0][0]
+        task = asyncio.create_task(driver.execute(self.SLOW, []))
+        await asyncio.sleep(1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=5)
+
+        monitor = await SQLServerDriver.create(_params(), DriverSettings())
+        try:
+            for _ in range(10):  # the server notices the dropped link shortly
+                result = await monitor.execute(
+                    # The freed session id may be the monitor's own by now.
+                    "SELECT COUNT(*) FROM sys.dm_exec_requests"
+                    " WHERE session_id = ? AND session_id <> @@SPID",
+                    [spid],
+                )
+                assert isinstance(result, ReadResult)
+                if result.rows == [[0]]:
+                    break
+                await asyncio.sleep(0.5)
+            assert result.rows == [[0]]
+        finally:
+            await monitor.disconnect()
+
+    async def test_should_report_lost_connection_then_reconnect(
+        self, driver: SQLServerDriver
+    ) -> None:
+        task = asyncio.create_task(driver.execute(self.SLOW, []))
+        await asyncio.sleep(1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=5)
+        # The dispatcher answers this by reconnecting and retrying.
+        with pytest.raises(ConnectionLostError):
+            await driver.execute("SELECT 1", [])
+        await driver.reconnect()
+        result = await driver.execute("SELECT 1", [])
+        assert isinstance(result, ReadResult)
+        assert result.rows == [[1]]
 
 
 class TestExploreList:

@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import threading
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Callable
@@ -26,8 +27,34 @@ from ..protocol import (
 
 T = TypeVar("T")
 
-INTERRUPT_INTERVAL = 0.1
-"""Seconds between repeated interrupts while a cancelled call winds down."""
+INTERRUPT_BACKSTOP = 0.1
+"""Seconds after a cancel's interrupt before it is sent once more."""
+
+_call = threading.local()
+"""Per worker thread: the cancel flag of the run_blocking call it is running."""
+
+
+class CallCancelled(BaseException):
+    """Raised on a worker thread by :func:`check_cancelled`.
+
+    A BaseException, like ``asyncio.CancelledError``, so the ``except
+    Exception`` around a best-effort query (a column sample, say) does not
+    swallow it and carry on to the next statement.
+    """
+
+
+def check_cancelled() -> None:
+    """Refuse to start a statement once the call running it has been cancelled.
+
+    Drivers call this from their statement chokepoint, just before sending a
+    statement. Outside a :func:`run_blocking` call it does nothing.
+
+    Raises:
+        CallCancelled: If the awaiting task has been cancelled.
+    """
+    cancelled: threading.Event | None = getattr(_call, "cancelled", None)
+    if cancelled is not None and cancelled.is_set():
+        raise CallCancelled
 
 
 async def run_blocking(
@@ -38,30 +65,67 @@ async def run_blocking(
     Cancelling the awaiting task cannot stop the worker thread, so a plain
     ``run_in_executor`` would leave the query running on the connection while
     the dispatcher hands that same connection to the next request. Instead, a
-    cancel calls `interrupt` — repeatedly, since one landing between two of
-    `fn`'s statements is a no-op — and waits for `fn` to return before
-    re-raising, so the connection is idle again once the cancel completes.
+    cancel stops `fn` on two fronts: it raises a flag that makes
+    :func:`check_cancelled` refuse the statements `fn` has yet to start, and
+    calls `interrupt` to abort the one it is running. It then waits for `fn`
+    to return before re-raising, so the connection is idle again once the
+    cancel completes.
+
+    An interrupt only aborts a statement already executing, so one leaves a
+    gap: a statement that passed :func:`check_cancelled` just before the flag
+    went up, but had not reached the database when the interrupt landed. A
+    second interrupt, :data:`INTERRUPT_BACKSTOP` later, closes it.
 
     Args:
         fn: The blocking call, run on a worker thread.
         interrupt: Thread-safe call that aborts the statement `fn` is running.
-            None for a client with no way to do so: the cancel then only waits.
+            None for a client with no way to do so: the statement running
+            when the cancel lands then runs to completion, but none after it.
     """
-    fut = asyncio.get_running_loop().run_in_executor(None, fn)
+    cancelled = threading.Event()
+
+    def call() -> T:
+        _call.cancelled = cancelled
+        try:
+            check_cancelled()  # cancelled while still queued for a thread
+            return fn()
+        finally:
+            _call.cancelled = None
+
+    fut = asyncio.get_running_loop().run_in_executor(None, call)
     try:
         return await asyncio.shield(fut)
     except asyncio.CancelledError:
-        while not fut.done():
-            if interrupt is not None:
-                try:
-                    interrupt()
-                except Exception:
-                    pass  # e.g. connection already closed: just wait it out
-            try:
-                await asyncio.wait([fut], timeout=INTERRUPT_INTERVAL)
-            except asyncio.CancelledError:
-                pass  # already cancelling
+        cancelled.set()
+        _interrupt(fut, interrupt)
+        await _wait_quietly(fut, INTERRUPT_BACKSTOP)
+        _interrupt(fut, interrupt)
+        await _wait_quietly(fut, None)
         raise
+
+
+def _interrupt(fut: asyncio.Future, interrupt: Callable[[], None] | None) -> None:
+    if interrupt is None or fut.done():
+        return
+    try:
+        interrupt()
+    except Exception:
+        pass  # e.g. connection already closed: just wait it out
+
+
+async def _wait_quietly(fut: asyncio.Future, timeout: float | None) -> None:
+    """Wait for `fut`, ignoring further cancels: the call is cancelling already."""
+    deadline = None if timeout is None else asyncio.get_running_loop().time() + timeout
+    while not fut.done():
+        remaining = (
+            None if deadline is None else deadline - asyncio.get_running_loop().time()
+        )
+        if remaining is not None and remaining <= 0:
+            return
+        try:
+            await asyncio.wait([fut], timeout=remaining)
+        except asyncio.CancelledError:
+            pass
 
 
 def find_reference(refs: list[TableReference], column: str) -> TableReference | None:

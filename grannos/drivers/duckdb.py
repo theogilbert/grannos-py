@@ -30,6 +30,7 @@ from .base import (
     DriverSettings,
     find_reference,
     group_references_by_column,
+    check_cancelled,
     group_references_by_ref_column,
     run_blocking,
 )
@@ -160,7 +161,8 @@ them yourself, or `delim`/`quote`/`skip` to override the dialect it sniffs.
         """Log a statement, then run it on the connection.
 
         Every query this driver sends goes through here, so debug logging of
-        them needs no change at the call sites.
+        them — and refusing them once the request is cancelled — needs no
+        change at the call sites.
 
         Args:
             sql: Statement text.
@@ -168,6 +170,7 @@ them yourself, or `delim`/`quote`/`skip` to override the dialect it sniffs.
             private: Set for the *user's* own statement, whose binds are user
                 data rather than the object names a catalog query binds.
         """
+        check_cancelled()
         log_query(logger, sql, None if private else binds)
         return self._conn.execute(sql, binds) if binds else self._conn.execute(sql)
 
