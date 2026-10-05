@@ -1,15 +1,29 @@
 """Unit tests for S3Driver — no live AWS account required."""
 
+import asyncio
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
 import yaml
 from botocore.exceptions import ClientError, EndpointConnectionError
+from botocore.awsrequest import AWSResponse
 
-from grannos.drivers.base import ConnectionLostError, DriverError, DriverSettings
-from grannos.drivers.s3 import S3Driver, _parse_s3_uri, _try_parse_s3_uri
+from grannos.drivers.base import (
+    ConnectionLostError,
+    DriverError,
+    DriverSettings,
+    run_blocking,
+)
+from grannos.drivers.s3 import (
+    S3Driver,
+    _open_client,
+    _parse_s3_uri,
+    _try_parse_s3_uri,
+)
 from grannos.protocol import (
     ExploreItem,
     GenericRecordDescription,
@@ -454,3 +468,41 @@ class TestConnectionHandling:
         driver = _make_driver(client)
         with pytest.raises(DriverError, match="AccessDenied"):
             await driver.explore_list([])
+
+
+class TestCancel:
+    async def test_should_refuse_api_calls_after_cancel(self) -> None:
+        client = _open_client({"access_key_id": "k", "secret_access_key": "s"})
+        sent: list[str] = []
+
+        def send(request: Any, **_: Any) -> AWSResponse:
+            sent.append(request.method)
+            return AWSResponse(request.url, 200, {}, _Raw(b"<ListAllMyBucketsResult/>"))
+
+        client.meta.events.register("before-send.s3", send)
+        started, release = threading.Event(), threading.Event()
+
+        def fn() -> None:
+            client.list_buckets()
+            started.set()
+            release.wait(timeout=5)
+            client.list_buckets()  # cancelled by now: must not be sent
+
+        task = asyncio.create_task(run_blocking(fn))
+        await asyncio.to_thread(started.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0.05)
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert sent == ["GET"]
+
+
+class _Raw:
+    """Stands in for urllib3's response body."""
+
+    def __init__(self, body: bytes) -> None:
+        self._body = body
+
+    def stream(self, *_: Any, **__: Any) -> Any:
+        yield self._body

@@ -12,6 +12,7 @@ Tests are skipped automatically when psycopg is not installed or the
 server is unreachable.
 """
 
+import asyncio
 import os
 import uuid
 from collections.abc import AsyncGenerator
@@ -93,6 +94,21 @@ class TestReconnect:
         await driver.reconnect()
         result = await driver.execute("SELECT 1", [])
         assert isinstance(result, ReadResult)
+
+
+class TestCancel:
+    async def test_should_abort_running_query(self, driver: PostgresDriver) -> None:
+        # No run_blocking here: psycopg's async connection itself sends the
+        # server a cancel when the awaiting task is cancelled, then drains the
+        # connection so it is idle again before the CancelledError surfaces.
+        task = asyncio.create_task(driver.execute("SELECT pg_sleep(30)", []))
+        await asyncio.sleep(1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=5)
+        result = await asyncio.wait_for(driver.execute("SELECT 1 AS n", []), timeout=5)
+        assert isinstance(result, ReadResult)
+        assert result.rows == [[1]]
 
 
 class TestExecute:

@@ -30,6 +30,7 @@ from .base import (
     group_references_by_column,
     check_cancelled,
     group_references_by_ref_column,
+    open_blocking,
     run_blocking,
 )
 
@@ -108,25 +109,17 @@ nullability, primary key flag).
         Returns:
             A connected SQLiteDriver instance.
         """
-        loop = asyncio.get_running_loop()
         try:
-            conn = await loop.run_in_executor(
-                None,
-                lambda: sqlite3.connect(
-                    params["database"], check_same_thread=False, isolation_level=None
-                ),
-            )
+            conn = await _open(params)
         except sqlite3.OperationalError as exc:
             raise DriverError(str(exc)) from exc
         return cls(params, conn, settings)
 
     async def reconnect(self) -> None:
-        self._conn = await self._run(
-            sqlite3.connect,
-            self.params["database"],
-            check_same_thread=False,
-            isolation_level=None,
-        )
+        try:
+            self._conn = await _open(self.params)
+        except sqlite3.Error as exc:
+            raise DriverError(str(exc)) from exc
 
     async def disconnect(self) -> None:
         await self._run(self._conn.close)
@@ -471,6 +464,15 @@ nullability, primary key flag).
             return await run_blocking(lambda: fn(*args, **kwargs), self._conn.interrupt)
         except sqlite3.Error as exc:
             raise DriverError(str(exc)) from exc
+
+
+async def _open(params: dict[str, Any]) -> sqlite3.Connection:
+    return await open_blocking(
+        lambda: sqlite3.connect(
+            params["database"], check_same_thread=False, isolation_level=None
+        ),
+        sqlite3.Connection.close,
+    )
 
 
 def _render_lob(

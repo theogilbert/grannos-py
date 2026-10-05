@@ -41,6 +41,7 @@ from .base import (
     find_reference,
     group_references_by_column,
     group_references_by_ref_column,
+    open_blocking,
     run_blocking,
 )
 
@@ -197,10 +198,8 @@ nullability, default).
         params: dict[str, Any],
     ) -> "tuple[mssql_python.Connection, _Link | None]":
         intent = params.get("applicationIntent", "")
-        loop = asyncio.get_running_loop()
         try:
-            return await loop.run_in_executor(
-                None,
+            return await open_blocking(
                 lambda: _connect_tracking_link(
                     server=f"{params.get('host', 'localhost')},{params.get('port', 1433)}",
                     uid=params.get("user", ""),
@@ -210,6 +209,7 @@ nullability, default).
                     autocommit=intent == _READ_ONLY_INTENT,
                     trustservercertificate="yes",
                 ),
+                lambda opened: opened[0].close(),
             )
         except Exception as exc:
             raise DriverError(str(exc)) from exc
@@ -919,6 +919,11 @@ def _connect_tracking_link(
         after = _tcp_sockets()
     new = after.keys() - before.keys()
     if len(new) != 1:
+        logger.warning(
+            f"Could not identify this connection's socket ({len(new)} new TCP "
+            f"sockets across the connect): a cancelled request will run its "
+            f"statement to completion before the cancel takes effect"
+        )
         return conn, None
     fd = new.pop()
     return conn, _Link(fd, after[fd])

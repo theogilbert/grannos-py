@@ -1,7 +1,6 @@
 """S3 driver — requires: pip install boto3 pyyaml"""
 
 import logging
-import asyncio
 import base64
 import fnmatch
 import re
@@ -28,7 +27,15 @@ from ..protocol import (
     RecordField,
     WriteResult,
 )
-from .base import BaseDriver, ConnectionLostError, DriverError, DriverSettings
+from .base import (
+    BaseDriver,
+    ConnectionLostError,
+    DriverError,
+    DriverSettings,
+    check_cancelled,
+    open_blocking,
+    run_blocking,
+)
 from .comments import blank_comments
 
 T = TypeVar("T")
@@ -154,17 +161,17 @@ objects larger than 25 MB are refused.
     async def create(
         cls, params: dict[str, Any], settings: DriverSettings
     ) -> "S3Driver":
-        client = await asyncio.get_running_loop().run_in_executor(
-            None, lambda: _open_client(params)
-        )
+        client = await _open(params)
         driver = cls(params, client, settings)
-        await driver._run(driver._client.list_buckets)
+        try:
+            await driver._run(driver._client.list_buckets)
+        except BaseException:
+            client.close()
+            raise
         return driver
 
     async def reconnect(self) -> None:
-        self._client = await asyncio.get_running_loop().run_in_executor(
-            None, lambda: _open_client(self.params)
-        )
+        self._client = await _open(self.params)
 
     async def disconnect(self) -> None:
         await self._run(self._client.close)
@@ -539,6 +546,7 @@ objects larger than 25 MB are refused.
         dst_bucket, dst_key = dst
         keys = self._match_keys_sync(src_bucket, src_key, opts)
         for key in keys:
+            check_cancelled()
             target = _join_relative(src_key, dst_key, key, opts.recursive)
             self._client.copy_object(
                 Bucket=dst_bucket,
@@ -554,6 +562,7 @@ objects larger than 25 MB are refused.
         keys = self._match_keys_sync(bucket, prefix, opts)
         dst_path = Path(dst)
         for key in keys:
+            check_cancelled()  # download_file's own calls run on its threads
             target = _join_relative_local(prefix, dst_path, key, opts.recursive)
             target.parent.mkdir(parents=True, exist_ok=True)
             self._client.download_file(bucket, key, str(target))
@@ -571,6 +580,7 @@ objects larger than 25 MB are refused.
             if opts.pattern:
                 paths = [p for p in paths if fnmatch.fnmatch(str(p), opts.pattern)]
             for p in paths:
+                check_cancelled()  # upload_file's own calls run on its threads
                 rel = p.relative_to(src_path).as_posix()
                 target_key = f"{dst_key.rstrip('/')}/{rel}" if dst_key else rel
                 self._client.upload_file(str(p), dst_bucket, target_key)
@@ -595,12 +605,17 @@ objects larger than 25 MB are refused.
     async def _run(self, fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
         # Every S3 API call goes through here; the operation name plus its
         # keyword arguments (Bucket, Key, Prefix) is the useful record.
+        #
+        # boto3 cannot abort a request in flight, so a cancel waits out the
+        # one running; the client's before-call hook (see _open_client) then
+        # refuses the next, which stops a paginated listing or a batch of
+        # copies part-way. A transfer runs its requests on s3transfer's own
+        # threads, out of the hook's reach: _download_sync/_upload_sync check
+        # between files instead, so a cancel finishes only the current file.
         op = getattr(fn, "__name__", repr(fn))
         log_query(logger, f"s3 {op} {kwargs}" if kwargs else f"s3 {op}")
         try:
-            return await asyncio.get_running_loop().run_in_executor(
-                None, lambda: fn(*args, **kwargs)
-            )
+            return await run_blocking(lambda: fn(*args, **kwargs))
         except (EndpointConnectionError, NoCredentialsError) as exc:
             raise ConnectionLostError(str(exc)) from exc
         except ClientError as exc:
@@ -626,9 +641,19 @@ def _open_client(params: dict[str, Any]) -> Any:
     if params.get("endpoint"):
         kwargs["endpoint_url"] = params["endpoint"]
     try:
-        return boto3.client("s3", **kwargs)
+        client = boto3.client("s3", **kwargs)
     except Exception as exc:
         raise DriverError(str(exc)) from exc
+    client.meta.events.register("before-call.s3", _refuse_if_cancelled)
+    return client
+
+
+def _refuse_if_cancelled(**_: Any) -> None:
+    check_cancelled()
+
+
+async def _open(params: dict[str, Any]) -> Any:
+    return await open_blocking(lambda: _open_client(params), lambda c: c.close())
 
 
 def _parse_s3_uri(uri: str) -> tuple[str, str]:

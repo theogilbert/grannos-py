@@ -15,6 +15,7 @@ from grannos.drivers.base import (
     DriverSettings,
     build_column_samples,
     check_cancelled,
+    open_blocking,
     run_blocking,
 )
 from grannos.protocol import (
@@ -286,3 +287,61 @@ class TestRunBlocking:
 
     def test_check_cancelled_should_do_nothing_outside_run_blocking(self) -> None:
         check_cancelled()
+
+
+class TestOpenBlocking:
+    async def test_should_return_connection(self) -> None:
+        assert await open_blocking(lambda: 42, lambda _: None) == 42
+
+    async def test_should_return_on_cancel_without_waiting(self) -> None:
+        started, release = threading.Event(), threading.Event()
+
+        def fn() -> int:
+            started.set()
+            release.wait(timeout=5)
+            return 42
+
+        task = asyncio.create_task(open_blocking(fn, lambda _: None))
+        await asyncio.to_thread(started.wait, 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=1)
+        release.set()
+
+    async def test_should_close_connection_opened_after_cancel(self) -> None:
+        started, release, closed = threading.Event(), threading.Event(), []
+
+        def fn() -> int:
+            started.set()
+            release.wait(timeout=5)
+            return 42
+
+        task = asyncio.create_task(open_blocking(fn, closed.append))
+        await asyncio.to_thread(started.wait, 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert closed == []  # still connecting
+        release.set()
+        for _ in range(100):
+            if closed:
+                break
+            await asyncio.sleep(0.01)
+        assert closed == [42]
+
+    async def test_should_not_close_after_failed_connect(self) -> None:
+        started, release, closed = threading.Event(), threading.Event(), []
+
+        def fn() -> int:
+            started.set()
+            release.wait(timeout=5)
+            raise DriverError("refused")
+
+        task = asyncio.create_task(open_blocking(fn, closed.append))
+        await asyncio.to_thread(started.wait, 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        release.set()
+        await asyncio.sleep(0.05)
+        assert closed == []

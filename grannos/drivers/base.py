@@ -104,6 +104,45 @@ async def run_blocking(
         raise
 
 
+async def open_blocking(fn: Callable[[], T], close: Callable[[T], None]) -> T:
+    """Run blocking connect `fn` in the default executor, honouring cancellation.
+
+    A connect cannot be interrupted, and waiting it out as :func:`run_blocking`
+    does would hold a cancelled connect to an unreachable host for its whole
+    timeout. So a cancel returns at once instead, and the connection `fn`
+    goes on to open — one nothing else will ever hold — is passed to `close`
+    when it arrives.
+
+    Args:
+        fn: The blocking connect, run on a worker thread.
+        close: Closes what `fn` returned. Run on a worker thread; its errors
+            are ignored.
+    """
+    fut = asyncio.get_running_loop().run_in_executor(None, fn)
+    try:
+        return await asyncio.shield(fut)
+    except asyncio.CancelledError:
+        fut.add_done_callback(lambda f: _close_orphan(f, close))
+        raise
+
+
+def _close_orphan(fut: asyncio.Future, close: Callable[[Any], None]) -> None:
+    if fut.cancelled() or fut.exception() is not None:
+        return
+    conn = fut.result()
+
+    def close_quietly() -> None:
+        try:
+            close(conn)
+        except Exception:
+            pass
+
+    try:
+        asyncio.get_running_loop().run_in_executor(None, close_quietly)
+    except RuntimeError:  # the executor is already shut down
+        close_quietly()
+
+
 def _interrupt(fut: asyncio.Future, interrupt: Callable[[], None] | None) -> None:
     if interrupt is None or fut.done():
         return

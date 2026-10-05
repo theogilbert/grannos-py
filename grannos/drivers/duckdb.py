@@ -32,6 +32,7 @@ from .base import (
     group_references_by_column,
     check_cancelled,
     group_references_by_ref_column,
+    open_blocking,
     run_blocking,
 )
 
@@ -128,20 +129,17 @@ them yourself, or `delim`/`quote`/`skip` to override the dialect it sniffs.
             params: May contain ``database`` (file path or ``:memory:``,
                 defaults to ``:memory:``).
         """
-        database = params.get("database") or ":memory:"
         try:
-            conn = await asyncio.get_running_loop().run_in_executor(
-                None, lambda: duckdb.connect(database)
-            )
+            conn = await _open(params)
         except duckdb.Error as exc:
             raise DriverError(str(exc)) from exc
         return cls(params, conn, settings)
 
     async def reconnect(self) -> None:
-        database = self.params.get("database") or ":memory:"
-        self._conn = await asyncio.get_running_loop().run_in_executor(
-            None, lambda: duckdb.connect(database)
-        )
+        try:
+            self._conn = await _open(self.params)
+        except duckdb.Error as exc:
+            raise DriverError(str(exc)) from exc
 
     async def disconnect(self) -> None:
         await self._run(self._conn.close)
@@ -589,6 +587,13 @@ them yourself, or `delim`/`quote`/`skip` to override the dialect it sniffs.
             return await run_blocking(lambda: fn(*args, **kwargs), self._conn.interrupt)
         except duckdb.Error as exc:
             raise DriverError(str(exc)) from exc
+
+
+async def _open(params: dict[str, Any]) -> duckdb.DuckDBPyConnection:
+    database = params.get("database") or ":memory:"
+    return await open_blocking(
+        lambda: duckdb.connect(database), duckdb.DuckDBPyConnection.close
+    )
 
 
 def _render_lob(

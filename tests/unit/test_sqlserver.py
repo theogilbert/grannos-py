@@ -9,7 +9,13 @@ import mssql_python
 import pytest
 
 from grannos.drivers.base import ConnectionLostError, DriverError, DriverSettings
-from grannos.drivers.sqlserver import SQLServerDriver, _Link, _render_lob
+from grannos.drivers import sqlserver
+from grannos.drivers.sqlserver import (
+    SQLServerDriver,
+    _connect_tracking_link,
+    _Link,
+    _render_lob,
+)
 from grannos.protocol import LobPlaceholder, ReadResult
 
 
@@ -138,3 +144,22 @@ class TestLinkSever:
             driver_error="Communication link failure", ddbc_error=""
         )
         await SQLServerDriver({}, conn, DriverSettings()).disconnect()
+
+
+class TestConnectTrackingLink:
+    def test_should_find_the_one_new_socket(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        snapshots = iter([{3: (1, 1)}, {3: (1, 1), 7: (1, 2)}])
+        monkeypatch.setattr(sqlserver, "_tcp_sockets", lambda: next(snapshots))
+        monkeypatch.setattr(mssql_python, "connect", lambda **_: "conn")
+        assert _connect_tracking_link() == ("conn", _Link(7, (1, 2)))
+
+    def test_should_warn_when_socket_is_ambiguous(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        snapshots = iter([{}, {7: (1, 2), 8: (1, 3)}])
+        monkeypatch.setattr(sqlserver, "_tcp_sockets", lambda: next(snapshots))
+        monkeypatch.setattr(mssql_python, "connect", lambda **_: "conn")
+        assert _connect_tracking_link() == ("conn", None)
+        assert "run its statement to completion" in caplog.text
