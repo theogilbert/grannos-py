@@ -195,6 +195,216 @@ class TestExecuteDML:
         assert result.rows_affected == 2
 
 
+class TestExecuteCountAndDistinct:
+    async def test_count_documents_applies_filter(self, driver: MongoDriver) -> None:
+        await driver._client[_TEST_DB]["orders"].insert_many(
+            [{"status": "open"}, {"status": "open"}, {"status": "closed"}]
+        )
+        result = await driver.execute(
+            _cmd(countDocuments="orders", filter={"status": "open"}), []
+        )
+        assert isinstance(result, ReadResult)
+        assert result.columns == ["count"]
+        assert result.rows == [["2"]]
+
+    async def test_count_is_count_documents(self, driver: MongoDriver) -> None:
+        await driver._client[_TEST_DB]["orders"].insert_many(
+            [{"n": i} for i in range(5)]
+        )
+        result = await driver.execute(_cmd(count="orders", skip=1, limit=3), [])
+        assert isinstance(result, ReadResult)
+        assert result.rows == [["3"]]
+
+    async def test_count_on_missing_collection_is_zero(
+        self, driver: MongoDriver
+    ) -> None:
+        result = await driver.execute(_cmd(countDocuments="orders"), [])
+        assert isinstance(result, ReadResult)
+        assert result.rows == [["0"]]
+
+    async def test_estimated_document_count(self, driver: MongoDriver) -> None:
+        await driver._client[_TEST_DB]["orders"].insert_many(
+            [{"n": i} for i in range(4)]
+        )
+        result = await driver.execute(_cmd(estimatedDocumentCount="orders"), [])
+        assert isinstance(result, ReadResult)
+        assert result.rows == [["4"]]
+
+    async def test_distinct_returns_one_row_per_value(
+        self, driver: MongoDriver
+    ) -> None:
+        await driver._client[_TEST_DB]["orders"].insert_many(
+            [
+                {"status": "open", "amount": 5},
+                {"status": "open", "amount": 50},
+                {"status": "closed", "amount": 50},
+                {"status": "void", "amount": 1},
+            ]
+        )
+        result = await driver.execute(
+            _cmd(distinct="orders", key="status", filter={"amount": {"$gt": 2}}), []
+        )
+        assert isinstance(result, ReadResult)
+        assert result.columns == ["status"]
+        assert sorted(r[0] for r in result.rows) == ["closed", "open"]
+
+    async def test_distinct_on_nested_key(self, driver: MongoDriver) -> None:
+        await driver._client[_TEST_DB]["users"].insert_many(
+            [{"address": {"city": "NYC"}}, {"address": {"city": "LA"}}]
+        )
+        result = await driver.execute(_cmd(distinct="users", key="address.city"), [])
+        assert isinstance(result, ReadResult)
+        assert sorted(r[0] for r in result.rows) == ["LA", "NYC"]
+
+
+class TestExecuteFindOne:
+    async def test_returns_first_by_sort(self, driver: MongoDriver) -> None:
+        await driver._client[_TEST_DB]["users"].insert_many(
+            [{"name": "Bob", "age": 40}, {"name": "Alice", "age": 30}]
+        )
+        result = await driver.execute(
+            _cmd(findOne="users", sort={"age": 1}, projection={"_id": 0}), []
+        )
+        assert isinstance(result, ReadResult)
+        assert result.columns == ["name", "age"]
+        assert result.rows == [["Alice", "30"]]
+
+    async def test_no_match_is_empty(self, driver: MongoDriver) -> None:
+        result = await driver.execute(_cmd(findOne="users"), [])
+        assert isinstance(result, ReadResult)
+        assert result.rows == []
+
+    async def test_find_skips(self, driver: MongoDriver) -> None:
+        await driver._client[_TEST_DB]["users"].insert_many(
+            [{"n": i} for i in range(5)]
+        )
+        result = await driver.execute(
+            _cmd(find="users", sort={"n": 1}, skip=3, projection={"_id": 0}), []
+        )
+        assert isinstance(result, ReadResult)
+        assert result.rows == [["3"], ["4"]]
+
+
+class TestExecuteReplaceAndUpsert:
+    async def test_replace_one(self, driver: MongoDriver) -> None:
+        await driver._client[_TEST_DB]["users"].insert_one({"name": "Alice", "age": 30})
+        result = await driver.execute(
+            _cmd(
+                replaceOne="users", filter={"name": "Alice"}, replacement={"name": "Al"}
+            ),
+            [],
+        )
+        assert isinstance(result, WriteResult)
+        assert result.rows_affected == 1
+        doc = await driver._client[_TEST_DB]["users"].find_one({}, {"_id": 0})
+        assert doc == {"name": "Al"}
+
+    async def test_upsert_counts_inserted_document(self, driver: MongoDriver) -> None:
+        result = await driver.execute(
+            _cmd(
+                updateOne="users",
+                filter={"name": "Dave"},
+                update={"$set": {"age": 40}},
+                options={"upsert": True},
+            ),
+            [],
+        )
+        assert isinstance(result, WriteResult)
+        assert result.rows_affected == 1
+        assert await driver._client[_TEST_DB]["users"].count_documents({}) == 1
+
+
+class TestExecuteFindOneAnd:
+    async def test_update_returns_document_after(self, driver: MongoDriver) -> None:
+        await driver._client[_TEST_DB]["users"].insert_one({"_id": "c", "seq": 1})
+        result = await driver.execute(
+            _cmd(
+                findOneAndUpdate="users",
+                filter={"_id": "c"},
+                update={"$inc": {"seq": 1}},
+                returnDocument="after",
+            ),
+            [],
+        )
+        assert isinstance(result, ReadResult)
+        assert dict(zip(result.columns, result.rows[0]))["seq"] == "2"
+
+    async def test_update_returns_document_before_by_default(
+        self, driver: MongoDriver
+    ) -> None:
+        await driver._client[_TEST_DB]["users"].insert_one({"_id": "c", "seq": 1})
+        result = await driver.execute(
+            _cmd(
+                findOneAndUpdate="users",
+                filter={"_id": "c"},
+                update={"$inc": {"seq": 1}},
+            ),
+            [],
+        )
+        assert isinstance(result, ReadResult)
+        assert dict(zip(result.columns, result.rows[0]))["seq"] == "1"
+
+    async def test_update_upserts(self, driver: MongoDriver) -> None:
+        result = await driver.execute(
+            _cmd(
+                findOneAndUpdate="users",
+                filter={"_id": "c"},
+                update={"$set": {"seq": 1}},
+                upsert=True,
+                returnDocument="after",
+            ),
+            [],
+        )
+        assert isinstance(result, ReadResult)
+        assert result.rows == [["c", "1"]]
+
+    async def test_replace(self, driver: MongoDriver) -> None:
+        await driver._client[_TEST_DB]["users"].insert_one({"_id": 1, "name": "Alice"})
+        await driver.execute(
+            _cmd(
+                findOneAndReplace="users", filter={"_id": 1}, replacement={"name": "Al"}
+            ),
+            [],
+        )
+        assert await driver._client[_TEST_DB]["users"].find_one({"_id": 1}) == {
+            "_id": 1,
+            "name": "Al",
+        }
+
+    async def test_delete_returns_deleted_document(self, driver: MongoDriver) -> None:
+        await driver._client[_TEST_DB]["users"].insert_many(
+            [{"name": "Alice", "age": 30}, {"name": "Bob", "age": 40}]
+        )
+        result = await driver.execute(
+            _cmd(findOneAndDelete="users", sort={"age": -1}, projection={"_id": 0}), []
+        )
+        assert isinstance(result, ReadResult)
+        assert result.rows == [["Bob", "40"]]
+        assert await driver._client[_TEST_DB]["users"].count_documents({}) == 1
+
+
+class TestExecuteRenameCollection:
+    async def test_renames(self, driver: MongoDriver) -> None:
+        await driver._client[_TEST_DB]["users"].insert_one({"name": "Alice"})
+        result = await driver.execute(_cmd(renameCollection="users", to="orders"), [])
+        assert isinstance(result, WriteResult)
+        names = await driver._client[_TEST_DB].list_collection_names()
+        assert "orders" in names
+        assert "users" not in names
+
+
+class TestExecuteRunCommand:
+    async def test_returns_reply_as_one_row(self, driver: MongoDriver) -> None:
+        await driver._client[_TEST_DB]["orders"].insert_one({"n": 1})
+        result = await driver.execute(
+            _cmd(runCommand={"count": "orders", "query": {"n": 1}}), []
+        )
+        assert isinstance(result, ReadResult)
+        row = dict(zip(result.columns, result.rows[0]))
+        assert row["n"] == "1"
+        assert row["ok"] == "1.0"
+
+
 class TestExecuteCreateCollection:
     async def test_creates_collection(self, driver: MongoDriver) -> None:
         db = _TEST_DB

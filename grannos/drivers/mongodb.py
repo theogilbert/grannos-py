@@ -3,7 +3,7 @@
 import logging
 import base64
 import json
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from enum import StrEnum
 from typing import Any
 
@@ -13,6 +13,7 @@ import pymongo.errors
 from bson import ObjectId, json_util
 from bson.errors import InvalidId
 from gridfs import AsyncGridFSBucket
+from pymongo import ReturnDocument
 
 from ..log import log_query
 from ..protocol import (
@@ -51,17 +52,38 @@ logger = logging.getLogger(__name__)
 
 class _Op(StrEnum):
     FIND = "find"
+    FIND_ONE = "findOne"
     AGGREGATE = "aggregate"
+    COUNT_DOCUMENTS = "countDocuments"
+    COUNT = "count"
+    ESTIMATED_DOCUMENT_COUNT = "estimatedDocumentCount"
+    DISTINCT = "distinct"
     INSERT_ONE = "insertOne"
     INSERT_MANY = "insertMany"
     UPDATE_ONE = "updateOne"
     UPDATE_MANY = "updateMany"
     DELETE_ONE = "deleteOne"
     DELETE_MANY = "deleteMany"
+    REPLACE_ONE = "replaceOne"
+    FIND_ONE_AND_UPDATE = "findOneAndUpdate"
+    FIND_ONE_AND_REPLACE = "findOneAndReplace"
+    FIND_ONE_AND_DELETE = "findOneAndDelete"
     CREATE_COLLECTION = "createCollection"
     DROP_COLLECTION = "dropCollection"
+    RENAME_COLLECTION = "renameCollection"
     CREATE_INDEX = "createIndex"
     DROP_INDEX = "dropIndex"
+    RUN_COMMAND = "runCommand"
+
+
+_UPDATE_OPTIONS = {
+    "upsert": "upsert",
+    "arrayFilters": "array_filters",
+    "hint": "hint",
+    "collation": "collation",
+}
+"""The mongosh-style (camelCase) `options` an update or replace accepts, mapped
+to their pymongo keyword arguments."""
 
 
 class MongoDriver(BaseDriver):
@@ -120,8 +142,20 @@ top-level operation key names the collection.
 {"find": "orders", "db": "mydb", "filter": {"status": "open"}, "sort": {"createdAt": -1}, "limit": 100}
 ```
 
-`filter`, `sort`, `projection`, and `limit` are all optional. `find` defaults
-to a limit of 1000 rows when `"limit"` is omitted.
+`filter`, `sort`, `projection`, `skip`, and `limit` are all optional. `find`
+defaults to a limit of 1000 rows when `"limit"` is omitted. `findOne` takes the
+same keys bar `skip`/`limit`, and returns the first match.
+
+```json
+{"countDocuments": "orders", "db": "mydb", "filter": {"status": "open"}}
+{"estimatedDocumentCount": "orders", "db": "mydb"}
+{"distinct": "orders", "db": "mydb", "key": "status", "filter": {"amount": {"$gt": 10}}}
+```
+
+`countDocuments` (or its shorthand `count`) counts exactly, and also takes
+`skip`/`limit`; `estimatedDocumentCount` reads the collection's metadata, so it
+is instant but ignores any filter. Both return one `count` row. `distinct`
+returns one row per distinct value of `key`, a dotted path for a nested field.
 
 ```json
 {"aggregate": "orders", "db": "mydb", "pipeline": [
@@ -136,6 +170,25 @@ to a limit of 1000 rows when `"limit"` is omitted.
 {"insertOne": "users", "db": "mydb", "document": {"name": "Alice", "age": 30}}
 {"updateOne": "users", "db": "mydb", "filter": {"name": "Alice"}, "update": {"$set": {"age": 31}}}
 {"deleteOne": "orders", "db": "mydb", "filter": {"status": "cancelled"}}
+{"replaceOne": "users", "db": "mydb", "filter": {"name": "Alice"}, "replacement": {"name": "Alice", "age": 32}}
+```
+
+`updateOne`, `updateMany`, and `replaceOne` take an optional `options` object:
+`upsert`, `arrayFilters`, `hint`, `collation`.
+
+```json
+{"updateOne": "users", "db": "mydb", "filter": {"name": "Dave"}, "update": {"$set": {"age": 40}}, "options": {"upsert": true}}
+```
+
+`findOneAndUpdate`, `findOneAndReplace`, and `findOneAndDelete` write like their
+`updateOne`/`replaceOne`/`deleteOne` counterparts, but return the document
+itself — as it was before the write, or after it with `"returnDocument":
+"after"`. `sort` picks which one when several match, and `projection` and
+`upsert` are accepted as well:
+
+```json
+{"findOneAndUpdate": "counters", "db": "mydb", "filter": {"_id": "orders"},
+ "update": {"$inc": {"seq": 1}}, "upsert": true, "returnDocument": "after"}
 ```
 
 Document values support Extended JSON, so BSON types that plain JSON can't
@@ -152,12 +205,22 @@ express — dates, ObjectIds, decimals — can be written directly:
 ```json
 {"createCollection": "events", "db": "mydb"}
 {"dropCollection": "old_events", "db": "mydb"}
+{"renameCollection": "events", "db": "mydb", "to": "events_2026", "dropTarget": false}
 {"createIndex": "users", "db": "mydb", "keys": {"email": 1}, "options": {"unique": true}}
 {"dropIndex": "users", "db": "mydb", "name": "email_1"}
 ```
 
 `options` is optional for both `createCollection` and `createIndex` and is
 passed through to the underlying pymongo call.
+
+**Any other command:** `runCommand` sends a raw [database
+command](https://www.mongodb.com/docs/manual/reference/command/) and returns its
+reply as one row:
+
+```json
+{"runCommand": {"collStats": "orders"}, "db": "mydb"}
+{"runCommand": {"explain": {"find": "orders", "filter": {"status": "open"}}}, "db": "mydb"}
+```
 
 Results are flattened with dot-notation column names (`address.city`, `address.zip`).
 
@@ -166,7 +229,8 @@ Results are flattened with dot-notation column names (`address.city`, `address.z
 A bucket named `<bucket>` (backed by `<bucket>.files`/`<bucket>.chunks`) is
 queried with `find` on a synthetic collection name `"gridfs.<bucket>"` —
 `filter`/`sort`/`limit` apply to the bucket's file metadata, not raw chunks
-(`aggregate` isn't supported for it, only `find`):
+(`countDocuments`, `estimatedDocumentCount`, `distinct`, and `findOne` work the
+same way; `aggregate` and the write commands don't):
 
 ```json
 {"find": "gridfs.fs", "db": "mydb", "filter": {"filename": {"$regex": "^report-2026"}}, "limit": 50}
@@ -235,18 +299,35 @@ to fetch its full content later without re-running the query.
                 its value is the collection name. Supported operations:
 
                 - ``find``: ``{"find": "col", "filter": {}, "projection": {},
-                  "sort": {}, "limit": N}``
+                  "sort": {}, "skip": N, "limit": N}``
+                - ``findOne``: ``{"findOne": "col", "filter": {}, "projection": {},
+                  "sort": {}}``
                 - ``aggregate``: ``{"aggregate": "col", "pipeline": [...]}``
+                - ``countDocuments`` / ``count``: ``{"countDocuments": "col",
+                  "filter": {}, "skip": N, "limit": N}``
+                - ``estimatedDocumentCount``: ``{"estimatedDocumentCount": "col"}``
+                - ``distinct``: ``{"distinct": "col", "key": "...", "filter": {}}``
                 - ``insertOne``: ``{"insertOne": "col", "document": {...}}``
                 - ``insertMany``: ``{"insertMany": "col", "documents": [...]}``
-                - ``updateOne``: ``{"updateOne": "col", "filter": {}, "update": {}}``
-                - ``updateMany``: ``{"updateMany": "col", "filter": {}, "update": {}}``
+                - ``updateOne``: ``{"updateOne": "col", "filter": {}, "update": {},
+                  "options": {}}``
+                - ``updateMany``: ``{"updateMany": "col", "filter": {}, "update": {},
+                  "options": {}}``
+                - ``replaceOne``: ``{"replaceOne": "col", "filter": {},
+                  "replacement": {}, "options": {}}``
                 - ``deleteOne``: ``{"deleteOne": "col", "filter": {}}``
                 - ``deleteMany``: ``{"deleteMany": "col", "filter": {}}``
+                - ``findOneAndUpdate`` / ``findOneAndReplace`` /
+                  ``findOneAndDelete``: ``{"findOneAndUpdate": "col",
+                  "filter": {}, "update": {}, "sort": {}, "projection": {},
+                  "upsert": bool, "returnDocument": "before" | "after"}``
                 - ``createCollection``: ``{"createCollection": "col", "options": {}}``
                 - ``dropCollection``: ``{"dropCollection": "col"}``
+                - ``renameCollection``: ``{"renameCollection": "col", "to": "...",
+                  "dropTarget": bool}``
                 - ``createIndex``: ``{"createIndex": "col", "keys": {}, "options": {}}``
                 - ``dropIndex``: ``{"dropIndex": "col", "name": "..."}``
+                - ``runCommand``: ``{"runCommand": {...}}``, any database command
 
                 ``"db"`` is required and names the target database.
             binds: Unused for MongoDB.
@@ -261,31 +342,38 @@ to fetch its full content later without re-running the query.
                     'MongoDB command must include a "db" key specifying the target database'
                 )
             db = self._client[cmd.pop("db")]
-            if _Op.FIND in cmd:
-                return await self._find(db, cmd)
-            if _Op.AGGREGATE in cmd:
-                return await self._aggregate(db, cmd)
-            if _Op.INSERT_ONE in cmd:
-                return await self._insert_one(db, cmd)
-            if _Op.INSERT_MANY in cmd:
-                return await self._insert_many(db, cmd)
-            if _Op.UPDATE_ONE in cmd:
-                return await self._update_one(db, cmd)
-            if _Op.UPDATE_MANY in cmd:
-                return await self._update_many(db, cmd)
-            if _Op.DELETE_ONE in cmd:
-                return await self._delete_one(db, cmd)
-            if _Op.DELETE_MANY in cmd:
-                return await self._delete_many(db, cmd)
-            if _Op.CREATE_COLLECTION in cmd:
-                return await self._create_collection(db, cmd)
-            if _Op.DROP_COLLECTION in cmd:
-                return await self._drop_collection(db, cmd)
-            if _Op.CREATE_INDEX in cmd:
-                return await self._create_index(db, cmd)
-            if _Op.DROP_INDEX in cmd:
-                return await self._drop_index(db, cmd)
-            raise DriverError(f"Unsupported command keys: {list(cmd.keys())}")
+            handlers: dict[_Op, Callable[[Any, dict[str, Any]], Awaitable[Any]]] = {
+                _Op.FIND: self._find,
+                _Op.FIND_ONE: self._find_one,
+                _Op.AGGREGATE: self._aggregate,
+                _Op.COUNT_DOCUMENTS: self._count_documents,
+                _Op.COUNT: self._count_documents,
+                _Op.ESTIMATED_DOCUMENT_COUNT: self._estimated_document_count,
+                _Op.DISTINCT: self._distinct,
+                _Op.INSERT_ONE: self._insert_one,
+                _Op.INSERT_MANY: self._insert_many,
+                _Op.UPDATE_ONE: self._update_one,
+                _Op.UPDATE_MANY: self._update_many,
+                _Op.REPLACE_ONE: self._replace_one,
+                _Op.DELETE_ONE: self._delete_one,
+                _Op.DELETE_MANY: self._delete_many,
+                _Op.FIND_ONE_AND_UPDATE: self._find_one_and_update,
+                _Op.FIND_ONE_AND_REPLACE: self._find_one_and_replace,
+                _Op.FIND_ONE_AND_DELETE: self._find_one_and_delete,
+                _Op.CREATE_COLLECTION: self._create_collection,
+                _Op.DROP_COLLECTION: self._drop_collection,
+                _Op.RENAME_COLLECTION: self._rename_collection,
+                _Op.CREATE_INDEX: self._create_index,
+                _Op.DROP_INDEX: self._drop_index,
+                _Op.RUN_COMMAND: self._run_command,
+            }
+            ops = [op for op in _Op if op in cmd]
+            if len(ops) != 1:
+                raise DriverError(
+                    f"MongoDB command must hold exactly one operation key "
+                    f"({', '.join(_Op)}), got {list(cmd.keys())}"
+                )
+            return await handlers[ops[0]](db, cmd)
         except Exception as exc:
             _maybe_raise_connection_lost(exc)
             if isinstance(exc, DriverError):
@@ -299,24 +387,53 @@ to fetch its full content later without re-running the query.
         filter_ = cmd.pop("filter", {})
         projection = cmd.pop("projection", None)
         sort = cmd.pop("sort", None)
+        skip = cmd.pop("skip", 0)
         limit = cmd.pop("limit", _DEFAULT_FIND_LIMIT)
         if collection_name.startswith(_GRIDFS_PREFIX):
             bucket = collection_name[len(_GRIDFS_PREFIX) :]
-            return await self._find_gridfs(db, bucket, filter_, sort, limit)
+            return await self._find_gridfs(db, bucket, filter_, sort, limit, skip)
         cursor = db[collection_name].find(filter_, projection).limit(limit)
+        if skip:
+            cursor = cursor.skip(skip)
         if sort:
             cursor = cursor.sort(list(sort.items()))
         return _docs_to_result(self._register_lob, await cursor.to_list())
 
+    async def _find_one(self, db: Any, cmd: dict[str, Any]) -> ReadResult:
+        _check_keys(cmd, _Op.FIND_ONE, {"filter", "projection", "sort"})
+        cmd[_Op.FIND] = cmd.pop(_Op.FIND_ONE)
+        cmd["limit"] = 1
+        return await self._find(db, cmd)
+
     async def _aggregate(self, db: Any, cmd: dict[str, Any]) -> ReadResult:
-        collection_name = cmd.pop(_Op.AGGREGATE)
-        if collection_name.startswith(_GRIDFS_PREFIX):
-            raise DriverError(
-                f'GridFS collections only support "find", not "aggregate" — query '
-                f'{collection_name!r} with {{"find": {collection_name!r}, "filter": {{...}}}}'
-            )
-        cursor = await db[collection_name].aggregate(cmd.pop("pipeline", []))
+        col = _collection(db, cmd.pop(_Op.AGGREGATE), _Op.AGGREGATE)
+        cursor = await col.aggregate(cmd.pop("pipeline", []))
         return _docs_to_result(self._register_lob, await cursor.to_list())
+
+    async def _count_documents(self, db: Any, cmd: dict[str, Any]) -> ReadResult:
+        op = _Op.COUNT_DOCUMENTS if _Op.COUNT_DOCUMENTS in cmd else _Op.COUNT
+        _check_keys(cmd, op, {"filter", "skip", "limit"})
+        col = _metadata_collection(db, cmd.pop(op))
+        kwargs = {k: cmd.pop(k) for k in ("skip", "limit") if k in cmd}
+        count = await col.count_documents(cmd.pop("filter", {}), **kwargs)
+        return _docs_to_result(self._register_lob, [{"count": count}])
+
+    async def _estimated_document_count(
+        self, db: Any, cmd: dict[str, Any]
+    ) -> ReadResult:
+        _check_keys(cmd, _Op.ESTIMATED_DOCUMENT_COUNT, set())
+        col = _metadata_collection(db, cmd.pop(_Op.ESTIMATED_DOCUMENT_COUNT))
+        count = await col.estimated_document_count()
+        return _docs_to_result(self._register_lob, [{"count": count}])
+
+    async def _distinct(self, db: Any, cmd: dict[str, Any]) -> ReadResult:
+        _check_keys(cmd, _Op.DISTINCT, {"key", "filter"})
+        col = _metadata_collection(db, cmd.pop(_Op.DISTINCT))
+        key = cmd.pop("key", None)
+        if not isinstance(key, str) or not key:
+            raise DriverError('"distinct" requires a "key" naming the field')
+        values = await col.distinct(key, cmd.pop("filter", {}))
+        return _docs_to_result(self._register_lob, [{key: v} for v in values])
 
     async def _find_gridfs(
         self,
@@ -325,6 +442,7 @@ to fetch its full content later without re-running the query.
         filter_: dict[str, Any],
         sort: dict[str, Any] | None,
         limit: int,
+        skip: int = 0,
     ) -> ReadResult:
         """Query a GridFS bucket's `.files` metadata collection, one row per
         matching file: filename, size, upload date, content-type, MD5, custom
@@ -337,6 +455,8 @@ to fetch its full content later without re-running the query.
         not passed through — a projection would apply to the wrong doc shape.
         """
         cursor = db[f"{bucket}.files"].find(filter_).limit(limit)
+        if skip:
+            cursor = cursor.skip(skip)
         cursor = (
             cursor.sort(list(sort.items())) if sort else cursor.sort([("filename", 1)])
         )
@@ -359,13 +479,25 @@ to fetch its full content later without re-running the query.
 
     async def _update_one(self, db: Any, cmd: dict[str, Any]) -> WriteResult:
         col = db[cmd.pop(_Op.UPDATE_ONE)]
-        result = await col.update_one(cmd.pop("filter", {}), cmd.pop("update", {}))
-        return WriteResult(rows_affected=result.modified_count)
+        result = await col.update_one(
+            cmd.pop("filter", {}), cmd.pop("update", {}), **_update_options(cmd)
+        )
+        return WriteResult(rows_affected=_rows_updated(result))
 
     async def _update_many(self, db: Any, cmd: dict[str, Any]) -> WriteResult:
         col = db[cmd.pop(_Op.UPDATE_MANY)]
-        result = await col.update_many(cmd.pop("filter", {}), cmd.pop("update", {}))
-        return WriteResult(rows_affected=result.modified_count)
+        result = await col.update_many(
+            cmd.pop("filter", {}), cmd.pop("update", {}), **_update_options(cmd)
+        )
+        return WriteResult(rows_affected=_rows_updated(result))
+
+    async def _replace_one(self, db: Any, cmd: dict[str, Any]) -> WriteResult:
+        _check_keys(cmd, _Op.REPLACE_ONE, {"filter", "replacement", "options"})
+        col = db[cmd.pop(_Op.REPLACE_ONE)]
+        result = await col.replace_one(
+            cmd.pop("filter", {}), cmd.pop("replacement", {}), **_update_options(cmd)
+        )
+        return WriteResult(rows_affected=_rows_updated(result))
 
     async def _delete_one(self, db: Any, cmd: dict[str, Any]) -> WriteResult:
         col = db[cmd.pop(_Op.DELETE_ONE)]
@@ -377,6 +509,58 @@ to fetch its full content later without re-running the query.
         result = await col.delete_many(cmd.pop("filter", {}))
         return WriteResult(rows_affected=result.deleted_count)
 
+    async def _find_one_and_update(self, db: Any, cmd: dict[str, Any]) -> ReadResult:
+        return await self._find_one_and(db, cmd, _Op.FIND_ONE_AND_UPDATE, "update")
+
+    async def _find_one_and_replace(self, db: Any, cmd: dict[str, Any]) -> ReadResult:
+        return await self._find_one_and(
+            db, cmd, _Op.FIND_ONE_AND_REPLACE, "replacement"
+        )
+
+    async def _find_one_and_delete(self, db: Any, cmd: dict[str, Any]) -> ReadResult:
+        return await self._find_one_and(db, cmd, _Op.FIND_ONE_AND_DELETE, None)
+
+    async def _find_one_and(
+        self, db: Any, cmd: dict[str, Any], op: _Op, change: str | None
+    ) -> ReadResult:
+        """Run a findOneAnd* write, returning the document it matched.
+
+        Args:
+            change: The key holding the update or replacement document; None
+                for a delete, which takes neither one nor `upsert`/`returnDocument`.
+        """
+        allowed = {"filter", "projection", "sort"}
+        if change is not None:
+            allowed |= {change, "upsert", "returnDocument"}
+        _check_keys(cmd, op, allowed)
+        col = db[cmd.pop(op)]
+        kwargs: dict[str, Any] = {"projection": cmd.pop("projection", None)}
+        if sort := cmd.pop("sort", None):
+            kwargs["sort"] = list(sort.items())
+        if change is None:
+            doc = await col.find_one_and_delete(cmd.pop("filter", {}), **kwargs)
+        else:
+            returned = cmd.pop("returnDocument", "before")
+            if returned not in ("before", "after"):
+                raise DriverError(
+                    f'"returnDocument" must be "before" or "after", got {returned!r}'
+                )
+            method = (
+                col.find_one_and_update
+                if op == _Op.FIND_ONE_AND_UPDATE
+                else col.find_one_and_replace
+            )
+            doc = await method(
+                cmd.pop("filter", {}),
+                cmd.pop(change, {}),
+                upsert=cmd.pop("upsert", False),
+                return_document=ReturnDocument.AFTER
+                if returned == "after"
+                else ReturnDocument.BEFORE,
+                **kwargs,
+            )
+        return _docs_to_result(self._register_lob, [doc] if doc is not None else [])
+
     async def _create_collection(self, db: Any, cmd: dict[str, Any]) -> WriteResult:
         name = cmd.pop(_Op.CREATE_COLLECTION)
         await db.create_collection(name, **cmd.pop("options", {}))
@@ -384,6 +568,15 @@ to fetch its full content later without re-running the query.
 
     async def _drop_collection(self, db: Any, cmd: dict[str, Any]) -> WriteResult:
         await db.drop_collection(cmd.pop(_Op.DROP_COLLECTION))
+        return WriteResult(rows_affected=1)
+
+    async def _rename_collection(self, db: Any, cmd: dict[str, Any]) -> WriteResult:
+        _check_keys(cmd, _Op.RENAME_COLLECTION, {"to", "dropTarget"})
+        col = db[cmd.pop(_Op.RENAME_COLLECTION)]
+        to = cmd.pop("to", None)
+        if not isinstance(to, str) or not to:
+            raise DriverError('"renameCollection" requires a "to" naming the new name')
+        await col.rename(to, dropTarget=cmd.pop("dropTarget", False))
         return WriteResult(rows_affected=1)
 
     async def _create_index(self, db: Any, cmd: dict[str, Any]) -> WriteResult:
@@ -397,6 +590,16 @@ to fetch its full content later without re-running the query.
         col = db[cmd.pop(_Op.DROP_INDEX)]
         await col.drop_index(cmd.pop("name"))
         return WriteResult(rows_affected=1)
+
+    async def _run_command(self, db: Any, cmd: dict[str, Any]) -> ReadResult:
+        _check_keys(cmd, _Op.RUN_COMMAND, set())
+        command = cmd.pop(_Op.RUN_COMMAND)
+        if not isinstance(command, dict) or not command:
+            raise DriverError(
+                '"runCommand" takes the command document, e.g. {"runCommand": {"ping": 1}}'
+            )
+        reply = await db.command(command)
+        return _docs_to_result(self._register_lob, [reply])
 
     async def explore_list(self, path: list[str]) -> list[ExploreItem]:
         try:
@@ -614,6 +817,54 @@ to fetch its full content later without re-running the query.
     async def _list_indexes(self, db_name: str, collection_name: str) -> list[str]:
         log_query(logger, f"index_information {db_name}.{collection_name}")
         return sorted(await self._client[db_name][collection_name].index_information())
+
+
+def _check_keys(cmd: dict[str, Any], op: _Op, allowed: set[str]) -> None:
+    """Reject keys `op` doesn't take, rather than silently ignore them — a
+    misspelt `filter` (or the native command's `query`) would otherwise count
+    or rewrite the whole collection."""
+    unknown = cmd.keys() - allowed - {op}
+    if unknown:
+        accepted = ", ".join(f'"{k}"' for k in sorted(allowed)) or "nothing else"
+        raise DriverError(
+            f'"{op}" does not take {", ".join(f"{k!r}" for k in sorted(unknown))} '
+            f"(it accepts {accepted})"
+        )
+
+
+def _collection(db: Any, name: str, op: _Op) -> Any:
+    """`db[name]`, refusing a synthetic GridFS name `op` can't query."""
+    if name.startswith(_GRIDFS_PREFIX):
+        raise DriverError(
+            f'GridFS collections don\'t support "{op}" — query {name!r} with '
+            f'{{"find": {name!r}, "filter": {{...}}}}'
+        )
+    return db[name]
+
+
+def _metadata_collection(db: Any, name: str) -> Any:
+    """`db[name]`, or for a synthetic `"gridfs.<bucket>"` name the bucket's
+    `.files` collection — the file metadata a GridFS `find` queries too."""
+    if name.startswith(_GRIDFS_PREFIX):
+        return db[f"{name[len(_GRIDFS_PREFIX) :]}.files"]
+    return db[name]
+
+
+def _update_options(cmd: dict[str, Any]) -> dict[str, Any]:
+    """Pop an update's mongosh-style `options` as pymongo keyword arguments."""
+    options = cmd.pop("options", {})
+    unknown = options.keys() - _UPDATE_OPTIONS.keys()
+    if unknown:
+        raise DriverError(
+            f"Unsupported update options: {sorted(unknown)} "
+            f"(supported: {', '.join(_UPDATE_OPTIONS)})"
+        )
+    return {_UPDATE_OPTIONS[k]: v for k, v in options.items()}
+
+
+def _rows_updated(result: Any) -> int:
+    """Documents an update changed, counting one it upserted."""
+    return result.modified_count + (result.upserted_id is not None)
 
 
 def _strip_comments(query: str) -> str:

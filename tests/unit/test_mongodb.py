@@ -355,7 +355,7 @@ class TestFindGridfs:
 
     async def test_aggregate_on_gridfs_collection_raises_driver_error(self) -> None:
         driver = _make_driver(_open_client()[0])
-        with pytest.raises(DriverError, match="only support"):
+        with pytest.raises(DriverError, match='don.t support "aggregate"'):
             await driver.execute(
                 '{"aggregate": "gridfs.fs", "db": "mydb", "pipeline": []}', []
             )
@@ -424,3 +424,86 @@ class TestExploreDownloadRefGridfs:
             # Not a "gridfs:" ref and not in the base cache -> base class's
             # "no longer available" error, proving the fallback ran.
             await driver.explore_download_ref("some-uuid-ref", None)
+
+
+class TestExecuteCommandValidation:
+    async def test_unknown_operation_raises_driver_error(self) -> None:
+        driver = _make_driver(_open_client()[0])
+        with pytest.raises(DriverError, match="exactly one operation key"):
+            await driver.execute('{"frobnicate": "users", "db": "mydb"}', [])
+
+    async def test_two_operations_raise_driver_error(self) -> None:
+        driver = _make_driver(_open_client()[0])
+        with pytest.raises(DriverError, match="exactly one operation key"):
+            await driver.execute(
+                '{"count": "users", "distinct": "users", "db": "mydb"}', []
+            )
+
+    async def test_count_rejects_native_query_key(self) -> None:
+        # The native count command filters with "query": silently ignoring it
+        # would count the whole collection.
+        client, _, col = _open_client()
+        col.count_documents = AsyncMock(return_value=3)
+        with pytest.raises(DriverError, match="does not take 'query'"):
+            await _make_driver(client).execute(
+                '{"count": "users", "db": "mydb", "query": {"a": 1}}', []
+            )
+        col.count_documents.assert_not_awaited()
+
+    async def test_distinct_requires_key(self) -> None:
+        driver = _make_driver(_open_client()[0])
+        with pytest.raises(DriverError, match='requires a "key"'):
+            await driver.execute('{"distinct": "users", "db": "mydb"}', [])
+
+    async def test_find_one_and_update_rejects_bad_return_document(self) -> None:
+        driver = _make_driver(_open_client()[0])
+        with pytest.raises(DriverError, match="returnDocument"):
+            await driver.execute(
+                '{"findOneAndUpdate": "users", "db": "mydb", "update": {}, '
+                '"returnDocument": "later"}',
+                [],
+            )
+
+    async def test_run_command_requires_document(self) -> None:
+        driver = _make_driver(_open_client()[0])
+        with pytest.raises(DriverError, match="takes the command document"):
+            await driver.execute('{"runCommand": "ping", "db": "mydb"}', [])
+
+
+class TestExecuteUpdateOptions:
+    async def test_translates_options_to_pymongo_kwargs(self) -> None:
+        client, _, col = _open_client()
+        col.update_one = AsyncMock(
+            return_value=MagicMock(modified_count=0, upserted_id=ObjectId())
+        )
+        result = await _make_driver(client).execute(
+            '{"updateOne": "users", "db": "mydb", "filter": {}, "update": {}, '
+            '"options": {"upsert": true, "arrayFilters": [{"x.a": 1}]}}',
+            [],
+        )
+        col.update_one.assert_awaited_once_with(
+            {}, {}, upsert=True, array_filters=[{"x.a": 1}]
+        )
+        assert isinstance(result, WriteResult)
+        assert result.rows_affected == 1  # the upserted document
+
+    async def test_rejects_unknown_option(self) -> None:
+        driver = _make_driver(_open_client()[0])
+        with pytest.raises(DriverError, match="Unsupported update options"):
+            await driver.execute(
+                '{"updateMany": "users", "db": "mydb", "update": {}, '
+                '"options": {"multi": true}}',
+                [],
+            )
+
+
+class TestCountAndDistinctGridfs:
+    async def test_count_documents_queries_bucket_files(self) -> None:
+        client, db, col = _open_client()
+        col.count_documents = AsyncMock(return_value=7)
+        result = await _make_driver(client).execute(
+            '{"countDocuments": "gridfs.fs", "db": "mydb"}', []
+        )
+        db.__getitem__.assert_called_with("fs.files")
+        assert isinstance(result, ReadResult)
+        assert result.columns == ["count"]

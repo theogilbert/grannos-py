@@ -483,8 +483,9 @@ The driver declares the `mongo` language (grannos.nvim's `mongo` filetype,
 {"find": "orders", "db": "mydb", "filter": {"status": "open"}, "sort": {"createdAt": -1}, "limit": 100}
 ```
 
-`filter`, `sort`, `projection`, and `limit` are all optional. `find` defaults
-to a limit of 1000 rows when `"limit"` is omitted.
+`filter`, `sort`, `projection`, `skip`, and `limit` are all optional. `find`
+defaults to a limit of 1000 rows when `"limit"` is omitted. `findOne` takes the
+same keys bar `skip`/`limit`, and returns the first match.
 
 ```json
 {"aggregate": "orders", "db": "mydb", "pipeline": [
@@ -492,6 +493,19 @@ to a limit of 1000 rows when `"limit"` is omitted.
   {"$sort": {"total": -1}}
 ]}
 ```
+
+**Count and distinct:**
+
+```json
+{"countDocuments": "orders", "db": "mydb", "filter": {"status": "open"}}
+{"estimatedDocumentCount": "orders", "db": "mydb"}
+{"distinct": "orders", "db": "mydb", "key": "status", "filter": {"amount": {"$gt": 10}}}
+```
+
+`countDocuments` (or its shorthand `count`) counts exactly, and also takes
+`skip`/`limit`; `estimatedDocumentCount` reads the collection's metadata, so it
+is instant but ignores any filter. Both return one `count` row. `distinct`
+returns one row per distinct value of `key`, a dotted path for a nested field.
 
 **Insert:**
 
@@ -513,6 +527,18 @@ to a limit of 1000 rows when `"limit"` is omitted.
 {"updateMany": "users", "db": "mydb", "filter": {"role": "guest"}, "update": {"$set": {"active": false}}}
 ```
 
+```json
+{"replaceOne": "users", "db": "mydb", "filter": {"name": "Alice"}, "replacement": {"name": "Alice", "age": 32}}
+```
+
+`updateOne`, `updateMany`, and `replaceOne` take an optional `options` object:
+`upsert`, `arrayFilters`, `hint`, `collation`. An upserted document counts
+towards `rows_affected`.
+
+```json
+{"updateOne": "users", "db": "mydb", "filter": {"name": "Dave"}, "update": {"$set": {"age": 40}}, "options": {"upsert": true}}
+```
+
 **Delete:**
 
 ```json
@@ -521,6 +547,18 @@ to a limit of 1000 rows when `"limit"` is omitted.
 
 ```json
 {"deleteMany": "orders", "db": "mydb", "filter": {"status": "cancelled"}}
+```
+
+**Find and modify:** `findOneAndUpdate`, `findOneAndReplace`, and
+`findOneAndDelete` write like their `updateOne`/`replaceOne`/`deleteOne`
+counterparts, but return the document itself as a read result — as it was
+before the write, or after it with `"returnDocument": "after"`. `sort` picks
+which one when several match, and `projection` and `upsert` are accepted as
+well:
+
+```json
+{"findOneAndUpdate": "counters", "db": "mydb", "filter": {"_id": "orders"},
+ "update": {"$inc": {"seq": 1}}, "upsert": true, "returnDocument": "after"}
 ```
 
 Document values support Extended JSON, so BSON types that plain JSON can't
@@ -537,12 +575,27 @@ express — dates, ObjectIds, decimals — can be written directly:
 ```json
 {"createCollection": "events", "db": "mydb"}
 {"dropCollection": "old_events", "db": "mydb"}
+{"renameCollection": "events", "db": "mydb", "to": "events_2026", "dropTarget": false}
 {"createIndex": "users", "db": "mydb", "keys": {"email": 1}, "options": {"unique": true}}
 {"dropIndex": "users", "db": "mydb", "name": "email_1"}
 ```
 
 `options` is optional for both `createCollection` and `createIndex` and is
 passed through to the underlying pymongo call.
+
+**Any other command:** `runCommand` sends a raw [database
+command](https://www.mongodb.com/docs/manual/reference/command/) and returns its
+reply as one row:
+
+```json
+{"runCommand": {"collStats": "orders"}, "db": "mydb"}
+{"runCommand": {"explain": {"find": "orders", "filter": {"status": "open"}}}, "db": "mydb"}
+```
+
+A command holds exactly one operation key. `findOne`, the counts, `distinct`,
+`replaceOne`, the `findOneAnd*` family, `renameCollection`, and `runCommand`
+reject keys they don't take rather than ignore them, so a native-style
+`"query"` in place of `"filter"` fails instead of counting the whole collection.
 
 Results are flattened with dot-notation column names (`address.city`,
 `address.zip`).
