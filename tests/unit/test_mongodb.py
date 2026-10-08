@@ -1,17 +1,20 @@
 """Unit tests for MongoDriver — no live database required."""
 
 import json
+import uuid
 from datetime import datetime
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pymongo.errors
 import pytest
-from bson import ObjectId
+from bson import Binary, ObjectId, json_util
 
 from grannos.drivers.base import ConnectionLostError, DriverError, DriverSettings
 from grannos.drivers.mongodb import (
     MongoDriver,
     _gridfs_buckets,
+    _gridfs_file_row,
     _is_gridfs_internal,
     _make_mongo_client,
     _serialize,
@@ -350,8 +353,8 @@ class TestFindGridfs:
         assert isinstance(lob, LobPlaceholder)
         assert lob.ref is not None
         assert lob.ref.startswith("gridfs:")
-        db_name, bucket, ref_id = json.loads(lob.ref[len("gridfs:") :])
-        assert (db_name, bucket, ref_id) == ("mydb", "fs", str(file_id))
+        db_name, bucket, ref_id = json_util.loads(lob.ref[len("gridfs:") :])
+        assert (db_name, bucket, ref_id) == ("mydb", "fs", file_id)
 
     async def test_aggregate_on_gridfs_collection_raises_driver_error(self) -> None:
         driver = _make_driver(_open_client()[0])
@@ -399,7 +402,7 @@ class TestExploreDownloadRefGridfs:
         client = MagicMock()
         driver = _make_driver(client)
         file_id = ObjectId()
-        ref = "gridfs:" + json.dumps(["mydb", "fs", str(file_id)])
+        ref = "gridfs:" + json_util.dumps(["mydb", "fs", file_id])
         with patch("grannos.drivers.mongodb.AsyncGridFSBucket") as bucket_cls:
             grid_out = MagicMock()
             grid_out.filename = "report.pdf"
@@ -417,6 +420,38 @@ class TestExploreDownloadRefGridfs:
         _, kwargs = bucket_cls.call_args
         assert kwargs["bucket_name"] == "fs"
         bucket_cls.return_value.open_download_stream.assert_called_once_with(file_id)
+
+    @pytest.mark.parametrize(
+        "file_id",
+        # A UUID _id reaches the driver as Binary subtype 4: the client keeps
+        # PyMongo's default uuidRepresentation, which decodes no UUID natively.
+        [ObjectId(), "report-2026.pdf", 42, Binary.from_uuid(uuid.UUID(int=7))],
+        ids=["objectid", "string", "int", "uuid"],
+    )
+    async def test_ref_round_trips_any_id_type(self, file_id: Any) -> None:
+        # GridFS accepts any _id (mongofiles --id, put(_id=...)): the ref a
+        # find hands out must download that same file, with its BSON type
+        # intact, rather than fail as "Malformed GridFS ref".
+        ref = _gridfs_file_row("mydb", "fs", {"_id": file_id})["content"].ref
+        driver = _make_driver(MagicMock())
+        with patch("grannos.drivers.mongodb.AsyncGridFSBucket") as bucket_cls:
+            grid_out = MagicMock()
+            grid_out.filename = "f"
+            grid_out.content_type = None
+            grid_out.read = AsyncMock(return_value=b"x")
+            grid_out.close = AsyncMock()
+            bucket_cls.return_value.open_download_stream = AsyncMock(
+                return_value=grid_out
+            )
+            await driver.explore_download_ref(ref, None)
+        (called_id,), _ = bucket_cls.return_value.open_download_stream.call_args
+        assert called_id == file_id
+        assert type(called_id) is type(file_id)
+
+    async def test_garbled_ref_raises_malformed(self) -> None:
+        driver = _make_driver(MagicMock())
+        with pytest.raises(DriverError, match="Malformed GridFS ref"):
+            await driver.explore_download_ref("gridfs:not json", None)
 
     async def test_non_gridfs_ref_falls_back_to_cache_lookup(self) -> None:
         driver = _make_driver(_open_client()[0])

@@ -10,8 +10,7 @@ from typing import Any
 import gridfs
 import pymongo
 import pymongo.errors
-from bson import ObjectId, json_util
-from bson.errors import InvalidId
+from bson import json_util
 from gridfs import AsyncGridFSBucket
 from pymongo import ReturnDocument
 
@@ -720,9 +719,10 @@ to fetch its full content later without re-running the query.
         """
         if ref.startswith(_GRIDFS_REF_PREFIX):
             try:
-                db_name, bucket, file_id = json.loads(ref[len(_GRIDFS_REF_PREFIX) :])
-                file_id = ObjectId(file_id)
-            except (json.JSONDecodeError, ValueError, InvalidId) as exc:
+                db_name, bucket, file_id = json_util.loads(
+                    ref[len(_GRIDFS_REF_PREFIX) :]
+                )
+            except (json.JSONDecodeError, ValueError, TypeError) as exc:
                 raise DriverError("Malformed GridFS ref") from exc
             try:
                 return await self._download_gridfs_file(
@@ -772,7 +772,7 @@ to fetch its full content later without re-running the query.
         )
 
     async def _download_gridfs_file(
-        self, db_name: str, bucket_name: str, file_id: ObjectId, dest_path: str | None
+        self, db_name: str, bucket_name: str, file_id: Any, dest_path: str | None
     ) -> DownloadResult:
         grid_bucket = AsyncGridFSBucket(self._client[db_name], bucket_name=bucket_name)
         grid_out = await grid_bucket.open_download_stream(file_id)
@@ -883,11 +883,14 @@ def _gridfs_file_row(db_name: str, bucket: str, doc: dict[str, Any]) -> dict[str
     size, metadata, and a `content` LOB cell carrying a ref the client can
     pass to explore.download later — never reads the actual file content.
     The ref encodes the file's _id rather than its filename, since GridFS
-    allows multiple files in a bucket to share the same filename."""
+    allows multiple files in a bucket to share the same filename — as
+    Extended JSON, since an _id need not be an ObjectId (mongofiles --id,
+    or any driver's put with an explicit _id, stores a string, a number, a
+    UUID...) and must come back as the same BSON type to match the file."""
     file_id = doc["_id"]
     filename = doc.get("filename", "")
     length = doc.get("length", 0)
-    ref = _GRIDFS_REF_PREFIX + json.dumps([db_name, bucket, str(file_id)])
+    ref = _GRIDFS_REF_PREFIX + json_util.dumps([db_name, bucket, file_id])
     return {
         "_id": file_id,
         "filename": filename,
