@@ -17,7 +17,7 @@ from collections.abc import AsyncGenerator
 import pytest
 
 from grannos.drivers.base import DriverError, DriverSettings
-from grannos.drivers.prometheus import PrometheusDriver
+from grannos.drivers.prometheus.driver import PrometheusDriver
 from grannos.protocol import (
     EntityDescription,
     FieldDescription,

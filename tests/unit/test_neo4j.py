@@ -8,7 +8,7 @@ import neo4j.exceptions
 import pytest
 
 from grannos.drivers.base import ConnectionLostError, DriverError, DriverSettings
-from grannos.drivers.neo4j import (
+from grannos.drivers.neo4j.driver import (
     Neo4jDriver,
     _maybe_raise_connection_lost,
     _plan_keyword,

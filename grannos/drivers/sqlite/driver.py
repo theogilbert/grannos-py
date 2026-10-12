@@ -5,24 +5,21 @@ import sqlite3
 from collections.abc import Callable, Sequence
 from typing import Any, ClassVar, TypeVar
 
-from ..log import log_query
-from ..protocol import (
+from ...log import log_query
+from ...protocol import (
     DescribeResult,
-    DriverParam,
     EntityDescription,
     ExploreItem,
     FieldDescription,
     IndexDescription,
     IndexKeyField,
-    Language,
     LobPlaceholder,
     NodeType,
-    ParamType,
     ReadResult,
     TableReference,
     WriteResult,
 )
-from .base import (
+from ..base import (
     BaseDriver,
     DriverError,
     DriverSettings,
@@ -33,6 +30,7 @@ from .base import (
     open_blocking,
     run_blocking,
 )
+from .meta import SQLiteMeta
 
 T = TypeVar("T")
 
@@ -40,7 +38,7 @@ T = TypeVar("T")
 logger = logging.getLogger(__name__)
 
 
-class SQLiteDriver(BaseDriver):
+class SQLiteDriver(SQLiteMeta, BaseDriver):
     """SQLite driver backed by the stdlib sqlite3 module.
 
     Args:
@@ -48,8 +46,6 @@ class SQLiteDriver(BaseDriver):
         conn: Open sqlite3 connection. Use :meth:`create` instead of constructing directly.
     """
 
-    LABEL = "SQLite"
-    LANGUAGES = [Language.SQL]
     DEFAULT_IDLE_TIMEOUT: ClassVar[float] = 0
     """File-based driver; idle connections are never closed automatically."""
 
@@ -59,37 +55,6 @@ class SQLiteDriver(BaseDriver):
         NodeType.COLUMN: [["*", "columns", "*"]],
         NodeType.INDEX: [["*", "indices", "*"]],
     }
-
-    PARAMS: list[DriverParam] = [
-        DriverParam(key="database", type=ParamType.STRING, label="Database file path"),
-    ]
-
-    HELP: str = """\
-## SQLite
-
-Standard SQL.
-
-```sql
-SELECT * FROM users WHERE age > 21
-SELECT u.id, o.total FROM users u JOIN orders o ON o.user_id = u.id
-INSERT INTO users (name, age) VALUES ('Alice', 30)
-```
-
-**Comments:** `--` to the end of the line, and `/* ... */`.
-
-**Resources:**
-
-```
-(root)
-└── <table|view>
-    ├── columns       → name, type
-    ├── indices       → index name
-    └── foreign_keys  → "col → ref_table.ref_col"
-```
-
-Describing a table or view returns full column metadata (name, type,
-nullability, primary key flag).
-"""
 
     def __init__(
         self, params: dict[str, Any], conn: sqlite3.Connection, settings: DriverSettings

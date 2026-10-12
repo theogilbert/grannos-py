@@ -8,7 +8,7 @@ import aiohttp
 import pytest
 
 from grannos.drivers.base import ConnectionLostError, DriverError, DriverSettings
-from grannos.drivers.prometheus import (
+from grannos.drivers.prometheus.driver import (
     PrometheusDriver,
     _data_to_result,
     _escape_label_value,

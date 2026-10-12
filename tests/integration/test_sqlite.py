@@ -6,7 +6,7 @@ from collections.abc import AsyncGenerator
 import pytest
 
 from grannos.drivers.base import DriverSettings
-from grannos.drivers.sqlite import SQLiteDriver
+from grannos.drivers.sqlite.driver import SQLiteDriver
 from grannos.explore_cache import CachingDriver, ConnectionCache
 from grannos.protocol import (
     EntityDescription,

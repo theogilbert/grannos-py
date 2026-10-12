@@ -20,7 +20,7 @@ from collections.abc import AsyncGenerator
 import pytest
 
 from grannos.drivers.base import ConnectionLostError, DriverSettings
-from grannos.drivers.sqlserver import SQLServerDriver
+from grannos.drivers.sqlserver.driver import SQLServerDriver
 from grannos.protocol import (
     EntityDescription,
     FieldDescription,

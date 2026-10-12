@@ -9,8 +9,8 @@ import mssql_python
 import pytest
 
 from grannos.drivers.base import ConnectionLostError, DriverError, DriverSettings
-from grannos.drivers import sqlserver
-from grannos.drivers.sqlserver import (
+from grannos.drivers.sqlserver import driver as sqlserver
+from grannos.drivers.sqlserver.driver import (
     SQLServerDriver,
     _connect_tracking_link,
     _Link,

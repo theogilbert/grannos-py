@@ -5,7 +5,7 @@ import asyncio
 import duckdb
 
 from grannos.drivers.base import DriverSettings
-from grannos.drivers.duckdb import DuckDBDriver, _render_lob
+from grannos.drivers.duckdb.driver import DuckDBDriver, _render_lob
 from grannos.protocol import LobPlaceholder, ReadResult
 
 

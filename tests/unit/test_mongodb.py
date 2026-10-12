@@ -11,7 +11,7 @@ import pytest
 from bson import Binary, ObjectId, json_util
 
 from grannos.drivers.base import ConnectionLostError, DriverError, DriverSettings
-from grannos.drivers.mongodb import (
+from grannos.drivers.mongodb.driver import (
     MongoDriver,
     _gridfs_buckets,
     _gridfs_file_row,
@@ -403,7 +403,7 @@ class TestExploreDownloadRefGridfs:
         driver = _make_driver(client)
         file_id = ObjectId()
         ref = "gridfs:" + json_util.dumps(["mydb", "fs", file_id])
-        with patch("grannos.drivers.mongodb.AsyncGridFSBucket") as bucket_cls:
+        with patch("grannos.drivers.mongodb.driver.AsyncGridFSBucket") as bucket_cls:
             grid_out = MagicMock()
             grid_out.filename = "report.pdf"
             grid_out.content_type = "application/pdf"
@@ -434,7 +434,7 @@ class TestExploreDownloadRefGridfs:
         # intact, rather than fail as "Malformed GridFS ref".
         ref = _gridfs_file_row("mydb", "fs", {"_id": file_id})["content"].ref
         driver = _make_driver(MagicMock())
-        with patch("grannos.drivers.mongodb.AsyncGridFSBucket") as bucket_cls:
+        with patch("grannos.drivers.mongodb.driver.AsyncGridFSBucket") as bucket_cls:
             grid_out = MagicMock()
             grid_out.filename = "f"
             grid_out.content_type = None

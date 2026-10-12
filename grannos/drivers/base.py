@@ -234,12 +234,19 @@ class FindNotSupported(Exception):
     convert a bug into a slow tree walk."""
 
 
-class BaseDriver(ABC):
-    """Base class for all database drivers.
+class DriverMeta:
+    """What a driver advertises to clients, declared apart from its implementation.
 
-    Args:
-        params: Raw connect request fields (e.g. ``{"driver": "sqlite", "database": "..."}``).
+    Each driver's subclass lives in its package's ``meta`` module and imports none
+    of the driver's client packages, so ``capabilities`` and ``driver.help`` can
+    be answered without loading them — those imports cost the bulk of server
+    startup. The driver class inherits its own subclass ahead of
+    :class:`BaseDriver`.
     """
+
+    REQUIRES: ClassVar[tuple[str, ...]] = ()
+    """Top-level packages the driver imports, checked with
+    :func:`importlib.util.find_spec` to tell whether it is installed."""
 
     LABEL: str = ""
     """Human-readable display name declared by each driver subclass."""
@@ -261,6 +268,27 @@ class BaseDriver(ABC):
 
     HELP: str = ""
     """Markdown help text declared by each driver subclass."""
+
+    SUPPORTS_WRITES: ClassVar[bool] = True
+    """Whether this driver's query language can express write operations.
+
+    True for nearly every driver; a genuinely read-only driver (e.g. Prometheus,
+    whose PromQL has no write syntax at all) overrides this to False so clients
+    can skip write-related connection settings (e.g. "always allow writes")
+    that would otherwise never apply.
+    """
+
+    SUPPORTS_HISTOGRAM: ClassVar[bool] = False
+    """Whether this driver implements :meth:`histogram`. Advertised to clients
+    as ``supports_histogram`` so they only offer the view where it works."""
+
+
+class BaseDriver(DriverMeta, ABC):
+    """Base class for all database drivers.
+
+    Args:
+        params: Raw connect request fields (e.g. ``{"driver": "sqlite", "database": "..."}``).
+    """
 
     FIND_PATHS: ClassVar[dict[NodeType, list[list[str]]]] = {}
     """Where each kind of node lives in this driver's object tree, as path
@@ -284,19 +312,6 @@ class BaseDriver(ABC):
     Connections idle for longer than the specified time will be automatically closed.
     The value can be set to 0 to disable closing the connection when idle too long.
     """
-
-    SUPPORTS_WRITES: ClassVar[bool] = True
-    """Whether this driver's query language can express write operations.
-
-    True for nearly every driver; a genuinely read-only driver (e.g. Prometheus,
-    whose PromQL has no write syntax at all) overrides this to False so clients
-    can skip write-related connection settings (e.g. "always allow writes")
-    that would otherwise never apply.
-    """
-
-    SUPPORTS_HISTOGRAM: ClassVar[bool] = False
-    """Whether this driver implements :meth:`histogram`. Advertised to clients
-    as ``supports_histogram`` so they only offer the view where it works."""
 
     _LOB_CACHE_MAX: ClassVar[int] = 200
     """Bound on the number of LobPlaceholder values kept in memory for later

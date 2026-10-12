@@ -20,7 +20,7 @@ from collections.abc import AsyncGenerator
 import pytest
 
 from grannos.drivers.base import DriverSettings
-from grannos.drivers.postgres import PostgresDriver
+from grannos.drivers.postgres.driver import PostgresDriver
 from grannos.protocol import (
     EntityDescription,
     FieldDescription,

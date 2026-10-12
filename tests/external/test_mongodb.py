@@ -17,7 +17,7 @@ from typing import Any
 import pytest
 
 from grannos.drivers.base import DriverSettings
-from grannos.drivers.mongodb import MongoDriver
+from grannos.drivers.mongodb.driver import MongoDriver
 from grannos.protocol import ExploreItem, ReadResult, WriteResult
 
 pytestmark = pytest.mark.external

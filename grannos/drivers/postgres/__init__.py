@@ -1,3 +1,4 @@
-from .driver import PostgresDriver
+"""PostgreSQL driver: ``meta`` declares what it advertises, ``driver`` implements it.
 
-__all__ = ["PostgresDriver"]
+Imports neither, so loading ``meta`` never imports the client package ``driver`` needs.
+"""

@@ -15,7 +15,7 @@ from collections.abc import AsyncGenerator
 import pytest
 
 from grannos.drivers.base import DriverError, DriverSettings
-from grannos.drivers.elasticsearch import ElasticsearchDriver
+from grannos.drivers.elasticsearch.driver import ElasticsearchDriver
 from grannos.protocol import EntityDescription, ReadResult
 
 pytestmark = pytest.mark.external

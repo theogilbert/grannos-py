@@ -18,7 +18,7 @@ from grannos.drivers.base import (
     DriverSettings,
     run_blocking,
 )
-from grannos.drivers.s3 import (
+from grannos.drivers.s3.driver import (
     S3Driver,
     _open_client,
     _parse_s3_uri,

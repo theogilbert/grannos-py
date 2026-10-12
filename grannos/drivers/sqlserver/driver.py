@@ -12,25 +12,21 @@ from typing import Any, TypeVar
 
 import mssql_python
 
-from ..log import log_query
-from ..protocol import (
+from ...log import log_query
+from ...protocol import (
     DescribeResult,
-    DriverParam,
-    DriverParamChoice,
     EntityDescription,
     ExploreItem,
     FieldDescription,
     IndexDescription,
     IndexKeyField,
-    Language,
     LobPlaceholder,
     NodeType,
-    ParamType,
     ReadResult,
     TableReference,
     WriteResult,
 )
-from .base import (
+from ..base import (
     SAMPLE_SCAN_ROWS,
     BaseDriver,
     ConnectionLostError,
@@ -44,6 +40,7 @@ from .base import (
     open_blocking,
     run_blocking,
 )
+from .meta import SQLServerMeta
 
 T = TypeVar("T")
 
@@ -84,7 +81,7 @@ def _exec(
         cur.execute(sql)
 
 
-class SQLServerDriver(BaseDriver):
+class SQLServerDriver(SQLServerMeta, BaseDriver):
     """SQL Server driver backed by mssql-python.
 
     Args:
@@ -93,9 +90,6 @@ class SQLServerDriver(BaseDriver):
         conn: Open mssql_python connection. Use :meth:`create` instead of constructing directly.
     """
 
-    LABEL = "SQL Server"
-    LANGUAGES = [Language.SQL]
-
     FIND_PATHS = {
         NodeType.SCHEMA: [["*"]],
         NodeType.TABLE: [["*", "*"]],
@@ -103,58 +97,6 @@ class SQLServerDriver(BaseDriver):
         NodeType.COLUMN: [["*", "*", "columns", "*"]],
         NodeType.INDEX: [["*", "*", "indices", "*"]],
     }
-
-    PARAMS: list[DriverParam] = [
-        DriverParam(key="host", type=ParamType.STRING, label="Host"),
-        DriverParam(key="port", type=ParamType.INTEGER, label="Port", default=1433),
-        DriverParam(key="database", type=ParamType.STRING, label="Database"),
-        DriverParam(key="user", type=ParamType.STRING, label="User"),
-        DriverParam(
-            key="applicationIntent",
-            type=ParamType.ENUM,
-            label="Application Intent",
-            choices=[
-                DriverParamChoice(value="READ_WRITE", label="READ_WRITE"),
-                DriverParamChoice(value="READ_ONLY", label="READ_ONLY"),
-            ],
-        ),
-        DriverParam(
-            key="password",
-            type=ParamType.STRING,
-            label="Password",
-            secret=True,
-            required=False,
-        ),
-    ]
-
-    HELP: str = """\
-## SQL Server
-
-**Queries:** Standard T-SQL.
-
-```sql
-SELECT * FROM dbo.orders WHERE status = 'open'
-SELECT o.id, c.name FROM dbo.orders o JOIN dbo.customers c ON c.id = o.customer_id
-INSERT INTO dbo.orders (customer_id, status) VALUES (1, 'open')
-```
-
-**Comments:** `--` to the end of the line, and `/* ... */`.
-
-**Resources:**
-
-```
-(root)
-└── <schema>
-    └── <table|view>
-        ├── columns      → name, data type
-        └── indices      → name, type (e.g. CLUSTERED)
-```
-
-System schemas (`sys`, `INFORMATION_SCHEMA`, `guest`, `db_*`) are hidden.
-
-Describing a table or view returns full column metadata (name, type,
-nullability, default).
-"""
 
     def __init__(
         self,

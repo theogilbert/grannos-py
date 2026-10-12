@@ -8,7 +8,7 @@ import elasticsearch
 import pytest
 
 from grannos.drivers.base import DriverError, DriverSettings
-from grannos.drivers.elasticsearch import (
+from grannos.drivers.elasticsearch.driver import (
     ElasticsearchDriver,
     _duration,
     _es_datetime,

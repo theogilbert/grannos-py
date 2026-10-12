@@ -4,7 +4,7 @@ import asyncio
 import sqlite3
 
 from grannos.drivers.base import DriverSettings
-from grannos.drivers.sqlite import SQLiteDriver, _render_lob
+from grannos.drivers.sqlite.driver import SQLiteDriver, _render_lob
 from grannos.protocol import LobPlaceholder, ReadResult
 
 

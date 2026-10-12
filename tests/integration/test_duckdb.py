@@ -5,7 +5,7 @@ from collections.abc import AsyncGenerator
 import pytest
 
 from grannos.drivers.base import DriverSettings
-from grannos.drivers.duckdb import DuckDBDriver
+from grannos.drivers.duckdb.driver import DuckDBDriver
 from grannos.protocol import (
     EntityDescription,
     ExploreItem,

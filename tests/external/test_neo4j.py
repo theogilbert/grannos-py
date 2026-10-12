@@ -17,7 +17,7 @@ from collections.abc import AsyncGenerator
 import pytest
 
 from grannos.drivers.base import DriverSettings
-from grannos.drivers.neo4j import Neo4jDriver
+from grannos.drivers.neo4j.driver import Neo4jDriver
 from grannos.protocol import (
     Connection,
     EntityDescription,

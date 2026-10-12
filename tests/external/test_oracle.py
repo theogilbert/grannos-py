@@ -21,7 +21,7 @@ from collections.abc import AsyncGenerator
 import pytest
 
 from grannos.drivers.base import DriverSettings
-from grannos.drivers.oracle import OracleDriver
+from grannos.drivers.oracle.driver import OracleDriver
 from grannos.protocol import (
     EntityDescription,
     FieldDescription,
