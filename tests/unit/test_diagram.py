@@ -3,7 +3,7 @@ from collections.abc import Awaitable, Callable, Mapping
 
 import pytest
 
-import grannos.diagram as diagram
+from grannos import diagram
 from grannos.diagram import DiagramError, build_diagram
 from grannos.diagram.place import PlaceResult, Spacing
 from grannos.diagram.route import NoRouteError

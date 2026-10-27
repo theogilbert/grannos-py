@@ -7,7 +7,7 @@ import sys
 from typing import Any, BinaryIO
 
 from . import log
-from .dispatcher import DispatchError, Dispatcher
+from .dispatcher import Dispatcher, DispatchError
 from .drivers import SENSITIVE_PARAM_KEYS
 from .drivers.base import DriverError, DriverSettings
 from .log import truncate
@@ -22,7 +22,6 @@ from .protocol import (
     decode,
     encode,
 )
-
 
 logger = logging.getLogger(__name__)
 

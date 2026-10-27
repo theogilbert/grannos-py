@@ -23,9 +23,9 @@ from ..base import (
     BaseDriver,
     DriverError,
     DriverSettings,
+    check_cancelled,
     find_reference,
     group_references_by_column,
-    check_cancelled,
     group_references_by_ref_column,
     open_blocking,
     run_blocking,
@@ -129,7 +129,7 @@ class SQLiteDriver(SQLiteMeta, BaseDriver):
                 [_render_lob(self._register_lob, v) for v in r] for r in cur.fetchall()
             ]
             return ReadResult(columns=columns, rows=rows, rows_total=len(rows))
-        return WriteResult(rows_affected=cur.rowcount if cur.rowcount >= 0 else 0)
+        return WriteResult(rows_affected=max(cur.rowcount, 0))
 
     async def explore_list(self, path: list[str]) -> list[ExploreItem]:
         """List child nodes at the given path in the SQLite object tree.
@@ -409,7 +409,7 @@ class SQLiteDriver(SQLiteMeta, BaseDriver):
                 self._run(self._fetch_sample_sync, table, col_name),
                 timeout=self._settings.column_sample_timeout,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return []
 
     def _fetch_sample_sync(self, table: str, col_name: str) -> list[Any]:

@@ -25,9 +25,9 @@ from ..base import (
     BaseDriver,
     DriverError,
     DriverSettings,
+    check_cancelled,
     find_reference,
     group_references_by_column,
-    check_cancelled,
     group_references_by_ref_column,
     open_blocking,
     run_blocking,
@@ -516,7 +516,7 @@ class DuckDBDriver(DuckDBMeta, BaseDriver):
                 self._run(self._fetch_sample_sync, schema, table, col_name),
                 timeout=self._settings.column_sample_timeout,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return []
 
     def _fetch_sample_sync(self, schema: str, table: str, col_name: str) -> list[Any]:

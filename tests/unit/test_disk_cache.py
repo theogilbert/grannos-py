@@ -9,8 +9,8 @@ from grannos.explore_cache import cache_file
 from grannos.protocol import (
     ConnectResult,
     EntityDescription,
-    ExploreItem,
     ExploreDescribeResult,
+    ExploreItem,
     ExploreListResult,
     FieldDescription,
     Method,

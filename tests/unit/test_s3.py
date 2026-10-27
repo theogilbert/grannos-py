@@ -9,8 +9,8 @@ from unittest.mock import MagicMock
 
 import pytest
 import yaml
-from botocore.exceptions import ClientError, EndpointConnectionError
 from botocore.awsrequest import AWSResponse
+from botocore.exceptions import ClientError, EndpointConnectionError
 
 from grannos.drivers.base import (
     ConnectionLostError,

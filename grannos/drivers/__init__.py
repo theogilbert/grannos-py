@@ -3,8 +3,8 @@ import importlib.util
 import logging
 from dataclasses import dataclass
 
-from .base import BaseDriver, DriverMeta
 from ..protocol import Driver
+from .base import BaseDriver, DriverMeta
 
 logger = logging.getLogger(__name__)
 

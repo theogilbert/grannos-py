@@ -1,8 +1,8 @@
 """Prometheus driver — requires: pip install aiohttp"""
 
-import logging
 import asyncio
 import base64
+import logging
 import math
 import re
 import time
@@ -22,14 +22,14 @@ from ...protocol import (
     GenericRecordDescription,
     NodeType,
     RawDocument,
-    RecordField,
     ReadResult,
+    RecordField,
     SpecialFloat,
     WriteResult,
 )
 from ..base import BaseDriver, ConnectionLostError, DriverError, DriverSettings
-from .meta import DEFAULT_URL, PrometheusMeta
 from ..comments import blank_comments
+from .meta import DEFAULT_URL, PrometheusMeta
 
 # How many values a label lists under a metric. A high-cardinality label
 # (`instance`, request ids) can carry far more, and neither a tree node nor a
@@ -400,7 +400,7 @@ class PrometheusDriver(PrometheusMeta, BaseDriver):
                 self._fetch_label_values_sample(metric, label),
                 timeout=self._settings.column_sample_timeout,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return []
 
     async def _fetch_label_values_sample(self, metric: str, label: str) -> list[Any]:

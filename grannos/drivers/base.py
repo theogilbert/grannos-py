@@ -14,16 +14,15 @@ from ..protocol import (
     DownloadResult,
     DriverParam,
     ExploreItem,
+    HistogramResult,
     Language,
     LobPlaceholder,
     NodeType,
-    HistogramResult,
     ReadResult,
     SearchScope,
     TableReference,
     WriteResult,
 )
-
 
 T = TypeVar("T")
 

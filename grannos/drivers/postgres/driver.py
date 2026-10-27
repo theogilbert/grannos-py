@@ -28,7 +28,6 @@ from ..base import (
     group_references_by_column,
     group_references_by_ref_column,
 )
-from .meta import PostgresMeta
 from ..comments import blank_comments
 from .copy import (
     CopyFromCommand,
@@ -38,6 +37,7 @@ from .copy import (
     parse_copy_from,
     parse_copy_to,
 )
+from .meta import PostgresMeta
 from .queries import (
     _exec,
     build_column_index_lists,
@@ -186,7 +186,7 @@ class PostgresDriver(PostgresMeta, BaseDriver):
                 ]
                 return ReadResult(columns=columns, rows=rows, rows_total=len(rows))
             invalidate_cache(self._conn)
-            return WriteResult(rows_affected=cur.rowcount if cur.rowcount >= 0 else 0)
+            return WriteResult(rows_affected=max(cur.rowcount, 0))
         except Exception as exc:
             _maybe_raise_connection_lost(exc)
             if isinstance(exc, psycopg.Error):
@@ -207,7 +207,7 @@ class PostgresDriver(PostgresMeta, BaseDriver):
                 with open(cmd.path, "wb") as f:
                     async for chunk in copy:
                         f.write(bytes(chunk))
-            return WriteResult(rows_affected=cur.rowcount if cur.rowcount >= 0 else 0)
+            return WriteResult(rows_affected=max(cur.rowcount, 0))
         except OSError as exc:
             raise DriverError(f"could not write to {cmd.path!r}: {exc}") from exc
         except Exception as exc:
@@ -232,7 +232,7 @@ class PostgresDriver(PostgresMeta, BaseDriver):
                     while chunk := f.read(_COPY_FROM_CHUNK_SIZE):
                         await copy.write(chunk)
             invalidate_cache(self._conn)
-            return WriteResult(rows_affected=cur.rowcount if cur.rowcount >= 0 else 0)
+            return WriteResult(rows_affected=max(cur.rowcount, 0))
         except OSError as exc:
             raise DriverError(f"could not read {cmd.path!r}: {exc}") from exc
         except Exception as exc:
@@ -457,7 +457,7 @@ class PostgresDriver(PostgresMeta, BaseDriver):
                 ),
                 timeout=self._settings.column_sample_timeout,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return []
 
     async def _fetch_samples(self, schema: str, table: str) -> dict[str, list[Any]]:
@@ -466,7 +466,7 @@ class PostgresDriver(PostgresMeta, BaseDriver):
                 fetch_table_sample_rows(self._conn, schema, table),
                 timeout=self._settings.column_sample_timeout,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return {}
         return build_column_samples(columns, rows, self._settings.column_sample_size)
 

@@ -1,8 +1,8 @@
 """MongoDB driver — requires: pip install pymongo"""
 
-import logging
 import base64
 import json
+import logging
 from collections.abc import Awaitable, Callable
 from enum import StrEnum
 from typing import Any
@@ -30,8 +30,8 @@ from ...protocol import (
 )
 from ...tabular import flatten_docs
 from ..base import BaseDriver, ConnectionLostError, DriverError, DriverSettings
-from .meta import MongoMeta
 from ..comments import blank_comments
+from .meta import MongoMeta
 
 _DEFAULT_FIND_LIMIT = 1000
 _GRIDFS_PREFIX = "gridfs."

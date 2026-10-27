@@ -34,7 +34,6 @@ from ..base import (
     group_references_by_column,
     group_references_by_ref_column,
 )
-from .meta import OracleMeta
 from ..comments import blank_comments
 from .load import (
     LoadCommand,
@@ -44,42 +43,43 @@ from .load import (
     read_rows,
     validate_identifier,
 )
+from .meta import OracleMeta
 from .queries import (
-    _exec,
-    _executemany,
     MAX_DBMS_OUTPUT_LINES,
     ColumnDetail,
+    _exec,
+    _executemany,
     apply_metadata_transform,
-    enable_dbms_output,
-    fetch_compilation_errors,
-    fetch_dbms_output,
     build_column_index_lists,
     build_preview_query,
+    enable_dbms_output,
     fetch_all_column_comments,
     fetch_column_details,
     fetch_column_names_and_types,
+    fetch_column_sample,
+    fetch_compilation_errors,
+    fetch_dbms_output,
     fetch_explain_plan,
     fetch_find_columns,
     fetch_find_indexes,
     fetch_find_tables_and_views,
+    fetch_incoming_references,
     fetch_index_ddl,
     fetch_index_fields_for_index,
-    invalidate_cache,
     fetch_index_fields_for_table,
     fetch_index_meta,
     fetch_index_metas_for_table,
-    fetch_incoming_references,
     fetch_index_names_and_types,
     fetch_join_tables_for_index,
-    fetch_nls_formats,
     fetch_join_tables_for_table,
-    fetch_column_sample,
+    fetch_nls_formats,
     fetch_outgoing_references,
     fetch_pk_columns,
     fetch_schemas,
     fetch_table_comment,
     fetch_table_sample_rows,
     fetch_tables_and_views,
+    invalidate_cache,
     render_lob,
     set_nls_format,
 )
@@ -239,7 +239,7 @@ class OracleDriver(OracleMeta, BaseDriver):
                 )
             invalidate_cache(self._conn)
             return WriteResult(
-                rows_affected=cur.rowcount if cur.rowcount >= 0 else 0,
+                rows_affected=max(cur.rowcount, 0),
                 messages=await self._collect_messages(cur, query),
             )
         except Exception as exc:
@@ -768,7 +768,7 @@ class OracleDriver(OracleMeta, BaseDriver):
                 ),
                 timeout=self._settings.column_sample_timeout,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return []
 
     async def _fetch_samples(self, schema: str, table: str) -> dict[str, list[Any]]:
@@ -777,7 +777,7 @@ class OracleDriver(OracleMeta, BaseDriver):
                 fetch_table_sample_rows(self._conn, schema, table),
                 timeout=self._settings.column_sample_timeout,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return {}
         return build_column_samples(columns, rows, self._settings.column_sample_size)
 
@@ -884,7 +884,10 @@ def _blank_comments(query: str) -> str:
 
 
 def _is_explain_plan(query: str) -> bool:
-    return re.match(r"\s*EXPLAIN\s+PLAN\b", _blank_comments(query), re.I) is not None
+    return (
+        re.match(r"\s*EXPLAIN\s+PLAN\b", _blank_comments(query), re.IGNORECASE)
+        is not None
+    )
 
 
 _CREATE_OBJECT_RE = re.compile(

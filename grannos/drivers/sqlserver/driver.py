@@ -187,7 +187,7 @@ class SQLServerDriver(SQLServerMeta, BaseDriver):
                 for r in cur.fetchall()  # ty: ignore[missing-argument]
             ]
             return ReadResult(columns=columns, rows=rows, rows_total=len(rows))
-        return WriteResult(rows_affected=cur.rowcount if cur.rowcount >= 0 else 0)
+        return WriteResult(rows_affected=max(cur.rowcount, 0))
 
     async def explore_list(self, path: list[str]) -> list[ExploreItem]:
         """List child nodes at the given path in the SQL Server object tree.
@@ -760,7 +760,7 @@ class SQLServerDriver(SQLServerMeta, BaseDriver):
                 self._run(self._fetch_sample_sync, schema, table, col_name),
                 timeout=self._settings.column_sample_timeout,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return []
 
     def _fetch_sample_sync(self, schema: str, table: str, col_name: str) -> list[Any]:
@@ -782,7 +782,7 @@ class SQLServerDriver(SQLServerMeta, BaseDriver):
                 self._run(self._fetch_sample_rows_sync, schema, table),
                 timeout=self._settings.column_sample_timeout,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return {}
         return build_column_samples(columns, rows, self._settings.column_sample_size)
 

@@ -1,7 +1,7 @@
 """Neo4j driver — requires: pip install neo4j"""
 
-import logging
 import asyncio
+import logging
 from collections.abc import Callable
 from typing import Any, LiteralString
 
@@ -23,7 +23,6 @@ from ...protocol import (
     WriteResult,
 )
 from ...tabular import flatten_docs
-from ..comments import blank_comments
 from ..base import (
     SAMPLE_SCAN_ROWS,
     BaseDriver,
@@ -32,8 +31,8 @@ from ..base import (
     DriverSettings,
     build_column_samples,
 )
+from ..comments import blank_comments
 from .meta import Neo4jMeta
-
 
 logger = logging.getLogger(__name__)
 
@@ -483,7 +482,7 @@ class Neo4jDriver(Neo4jMeta, BaseDriver):
                 self._fetch_node_samples(label),
                 timeout=self._settings.column_sample_timeout,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return {}
 
     async def _fetch_node_samples(self, label: str) -> dict[str, list[Any]]:
@@ -505,7 +504,7 @@ class Neo4jDriver(Neo4jMeta, BaseDriver):
                 self._fetch_relationship_samples(rel_type),
                 timeout=self._settings.column_sample_timeout,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return {}
 
     async def _fetch_relationship_samples(self, rel_type: str) -> dict[str, list[Any]]:

@@ -1,8 +1,8 @@
 """S3 driver — requires: pip install boto3 pyyaml"""
 
-import logging
 import base64
 import fnmatch
+import logging
 import re
 import shlex
 from collections.abc import Callable
@@ -34,8 +34,8 @@ from ..base import (
     open_blocking,
     run_blocking,
 )
-from .meta import S3Meta
 from ..comments import blank_comments
+from .meta import S3Meta
 
 T = TypeVar("T")
 
@@ -74,6 +74,9 @@ class S3Driver(S3Meta, BaseDriver):
     async def create(
         cls, params: dict[str, Any], settings: DriverSettings
     ) -> "S3Driver":
+        """test docstring.
+
+        foo bar"""
         client = await _open(params)
         driver = cls(params, client, settings)
         try:

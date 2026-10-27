@@ -10,9 +10,9 @@ import pytest
 from grannos.drivers.base import DriverError, DriverSettings
 from grannos.drivers.elasticsearch.driver import (
     ElasticsearchDriver,
+    _bucket_step,
     _duration,
     _es_datetime,
-    _bucket_step,
     _fill_span,
     _resolve_time,
     _split_commands,

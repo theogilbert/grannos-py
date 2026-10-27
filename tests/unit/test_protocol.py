@@ -1,5 +1,5 @@
 import json
-from datetime import date, datetime, time, timezone
+from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from uuid import UUID
 
@@ -94,7 +94,7 @@ class TestEncode:
         assert json.loads(data)["result"] == "12345678-1234-5678-1234-567812345678"
 
     def test_should_serialise_datetime_as_iso_string(self) -> None:
-        dt = datetime(2024, 3, 15, 10, 30, 0, tzinfo=timezone.utc)
+        dt = datetime(2024, 3, 15, 10, 30, 0, tzinfo=UTC)
         data = encode(Result(id=1, result={"ts": dt}, error=None))
         assert json.loads(data)["result"]["ts"] == "2024-03-15T10:30:00+00:00"
 

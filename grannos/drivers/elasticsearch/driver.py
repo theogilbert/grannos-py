@@ -1,7 +1,7 @@
 """Elasticsearch driver — requires: pip install elasticsearch aiohttp"""
 
-import logging
 import json
+import logging
 import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -23,8 +23,8 @@ from ...protocol import (
 )
 from ...tabular import flatten_docs
 from ..base import BaseDriver, ConnectionLostError, DriverError, DriverSettings
-from .meta import DEFAULT_TIME_FIELD, ElasticsearchMeta
 from ..comments import blank_comments
+from .meta import DEFAULT_TIME_FIELD, ElasticsearchMeta
 
 _DEFAULT_SEARCH_SIZE = 1000
 

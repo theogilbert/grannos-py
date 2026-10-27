@@ -15,11 +15,11 @@ from grannos.drivers.base import (
 from grannos.drivers.oracle.driver import (
     OracleDriver,
     _alter_session_property,
+    _created_object,
     _format_db_error,
     _format_type,
     _is_explain_plan,
     _offset_to_line_col,
-    _created_object,
     _reject_sqlplus_terminator,
     _replace_undecodable_text,
     _statement_start_line,
