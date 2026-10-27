@@ -5,7 +5,7 @@ set -euo pipefail
 
 CONTAINER="mongodb-dev"
 PORT=27017
-IMAGE="docker.io/library/mongo:8"
+IMAGE="docker.io/library/mongo:7.0"
 DATABASE="grannos_test"
 TIMEOUT=60
 
