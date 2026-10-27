@@ -5,7 +5,7 @@ import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import yaml
@@ -450,6 +450,45 @@ class TestExecuteErrors:
         driver = _make_driver(MagicMock())
         with pytest.raises(DriverError):
             await driver.execute("", [])
+
+
+class TestRestrictedCredentials:
+    async def test_create_survives_denied_list_buckets(self) -> None:
+        client = MagicMock()
+        client.list_buckets.side_effect = _client_error("AccessDenied", "nope")
+        with patch("grannos.drivers.s3.driver._open", AsyncMock(return_value=client)):
+            driver = await S3Driver.create({}, DriverSettings())
+        assert driver is not None
+        client.close.assert_not_called()
+
+    async def test_create_still_fails_on_other_client_errors(self) -> None:
+        client = MagicMock()
+        client.list_buckets.side_effect = _client_error("InvalidAccessKeyId", "bad")
+        with (
+            patch("grannos.drivers.s3.driver._open", AsyncMock(return_value=client)),
+            pytest.raises(DriverError, match="InvalidAccessKeyId"),
+        ):
+            await S3Driver.create({}, DriverSettings())
+        client.close.assert_called_once()
+
+    async def test_root_lists_configured_buckets_without_calling_s3(self) -> None:
+        client = MagicMock()
+        driver = S3Driver({"buckets": "a, b"}, client, DriverSettings())
+        items = await driver.explore_list([])
+        assert [i.name for i in items] == ["a", "b"]
+        client.list_buckets.assert_not_called()
+
+    async def test_bucket_describe_tolerates_denied_location(self) -> None:
+        client = MagicMock()
+        client.get_bucket_location.side_effect = _client_error("AccessDenied", "x")
+        client.get_bucket_versioning.return_value = {}
+        client.list_buckets.side_effect = _client_error("AccessDenied", "x")
+        client.get_bucket_lifecycle_configuration.side_effect = _client_error(
+            "NoSuchLifecycleConfiguration", "x"
+        )
+        result = await _make_driver(client).explore_describe(["b"])
+        assert isinstance(result, RawDocument)
+        assert "region" not in result.content
 
 
 class TestConnectionHandling:

@@ -34,6 +34,12 @@ class S3Meta(DriverMeta):
             default="us-east-1",
         ),
         DriverParam(
+            key="buckets",
+            type=ParamType.STRING,
+            label="Buckets (comma-separated; for credentials that cannot list all buckets)",
+            required=False,
+        ),
+        DriverParam(
             key="endpoint",
             type=ParamType.STRING,
             label="Endpoint URL (for S3-compatible stores, e.g. MinIO/R2)",
@@ -54,7 +60,8 @@ rm s3://bucket/key [--recursive] [--pattern GLOB]
 presign s3://bucket/key [--expires-in SECONDS]
 ```
 
-`ls` with no URI lists buckets. `--pattern` is a glob (`fnmatch`) filter applied
+`ls` with no URI lists buckets (the `buckets` connection param, when set, is
+used instead of asking S3 — for credentials without `s3:ListAllMyBuckets`). `--pattern` is a glob (`fnmatch`) filter applied
 to full object keys — a deliberate deviation from the real `aws` CLI, which has
 no filtering on `ls` at all and splits filtering into `--exclude`/`--include`
 on the other verbs.

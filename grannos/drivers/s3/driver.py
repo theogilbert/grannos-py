@@ -47,6 +47,8 @@ usefully load into a Neovim buffer."""
 
 _NOT_FOUND_CODES = {"404", "NoSuchKey", "NotFound", "NoSuchBucket"}
 
+_DENIED_CODES = {"AccessDenied", "403", "AllAccessDisabled"}
+
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +83,15 @@ class S3Driver(S3Meta, BaseDriver):
         driver = cls(params, client, settings)
         try:
             await driver._run(driver._client.list_buckets)
+        except DriverError as exc:
+            # Credentials restricted to specific buckets often lack
+            # s3:ListAllMyBuckets; that must not make the connection unusable.
+            if (
+                not isinstance(exc.__cause__, ClientError)
+                or _error_code(exc.__cause__) not in _DENIED_CODES
+            ):
+                client.close()
+                raise
         except BaseException:
             client.close()
             raise
@@ -254,10 +265,15 @@ class S3Driver(S3Meta, BaseDriver):
                 return None
 
     def _describe_bucket_sync(self, bucket: str) -> RawDocument:
-        region = (
-            self._client.get_bucket_location(Bucket=bucket).get("LocationConstraint")
-            or "us-east-1"
-        )
+        try:
+            region = (
+                self._client.get_bucket_location(Bucket=bucket).get(
+                    "LocationConstraint"
+                )
+                or "us-east-1"
+            )
+        except ClientError:
+            region = None
         try:
             versioning_status = self._client.get_bucket_versioning(Bucket=bucket).get(
                 "Status"
@@ -266,10 +282,10 @@ class S3Driver(S3Meta, BaseDriver):
             versioning_status = None
         versioning = "enabled" if versioning_status == "Enabled" else "disabled"
         created = self._bucket_creation_date_sync(bucket)
-        doc: dict[str, Any] = {
-            "region": region,
-            "versioning": versioning,
-        }
+        doc: dict[str, Any] = {}
+        if region:
+            doc["region"] = region
+        doc["versioning"] = versioning
         if created:
             doc["created"] = created
         rules = self._bucket_lifecycle_rules_sync(bucket)
@@ -279,7 +295,11 @@ class S3Driver(S3Meta, BaseDriver):
         return RawDocument(filetype="yaml", content=content)
 
     def _bucket_creation_date_sync(self, bucket: str) -> str | None:
-        for name, iso in self._list_buckets_sync():
+        try:
+            buckets = self._list_buckets_sync()
+        except ClientError:
+            return None
+        for name, iso in buckets:
             if name == bucket:
                 return iso
         return None
@@ -397,6 +417,9 @@ class S3Driver(S3Meta, BaseDriver):
     # -- transfer helpers (sync, run in executor) --------------------------
 
     def _list_buckets_sync(self) -> list[tuple[str, str | None]]:
+        configured = _configured_buckets(self.params)
+        if configured:
+            return [(name, None) for name in configured]
         resp = self._client.list_buckets()
         return [
             (b["Name"], _iso(b.get("CreationDate"))) for b in resp.get("Buckets", [])
@@ -652,6 +675,11 @@ def _iso(value: Any) -> str | None:
     if hasattr(value, "isoformat"):
         return value.isoformat()
     return str(value)
+
+
+def _configured_buckets(params: dict[str, Any]) -> list[str]:
+    raw = params.get("buckets") or ""
+    return [b for b in (part.strip() for part in raw.split(",")) if b]
 
 
 def _error_code(exc: ClientError) -> str:
