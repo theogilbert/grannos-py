@@ -136,26 +136,26 @@ class TestExploreList:
         assert "job" in names
         assert "instance" in names
         assert "__name__" not in names
-        assert all(not i.expandable for i in items)
+        assert all(i.type == "label" and i.expandable for i in items)
 
-    async def test_label_path_returns_empty(self, driver: PrometheusDriver) -> None:
+    async def test_label_lists_values(self, driver: PrometheusDriver) -> None:
         items = await driver.explore_list(["metrics", "up", "job"])
-        assert items == []
+        assert "prometheus" in [i.name for i in items]
+        assert all(i.type == "label_value" and not i.expandable for i in items)
 
     async def test_unknown_path_returns_empty(self, driver: PrometheusDriver) -> None:
         items = await driver.explore_list(["metrics", "up", "job", "extra"])
         assert items == []
 
-    async def test_jobs_lists_scrape_jobs_as_leaves(
-        self, driver: PrometheusDriver
-    ) -> None:
+    async def test_jobs_lists_scrape_jobs(self, driver: PrometheusDriver) -> None:
         items = await driver.explore_list(["jobs"])
         assert "prometheus" in [i.name for i in items]
-        assert all(i.type == "job" and not i.expandable for i in items)
+        assert all(i.type == "job" and i.expandable for i in items)
 
-    async def test_job_path_returns_empty(self, driver: PrometheusDriver) -> None:
+    async def test_job_lists_its_metrics(self, driver: PrometheusDriver) -> None:
         items = await driver.explore_list(["jobs", "prometheus"])
-        assert items == []
+        assert "up" in [i.name for i in items]
+        assert all(i.type == "metric" and i.expandable for i in items)
 
 
 class TestExploreDescribe:
